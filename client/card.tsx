@@ -272,7 +272,6 @@ export const AgentCard = memo(function AgentCard({
           marginTop: 1,
         },
         contextText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13, flexShrink: 1 },
-        compactButton: { flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 3 },
         compactText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
         wsText: {
           flex: 1,
