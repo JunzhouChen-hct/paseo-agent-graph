@@ -7,6 +7,7 @@ import { configureAgentRpc } from "../shared/graph";
 import { agentGraphSettings } from "../shared/settings";
 import { useAgentTimeline, type AgentExtras, type TimelineView } from "./timeline";
 import { canReadClipboardImage, readClipboardImage, type ClipboardImage } from "./web";
+import { ContextMeter } from "./context-meter";
 
 interface PickerRequest {
   title: string;
@@ -351,6 +352,32 @@ export function AgentConsole({
     });
   }, []);
 
+  // 压缩上下文:给当前会话发送 /compact。需求4的统一发送入口由 sendCompactRef 注入,
+  // 未注入时走下面的独立最小实现(直接发送,不进 pendingQueue,不改 handleSend/queue 逻辑)。
+  const sendCompactRef = useRef<(() => Promise<void>) | null>(null);
+  const [compacting, setCompacting] = useState(false);
+  const handleCompact = useCallback(async () => {
+    if (compacting) return;
+    setCompacting(true);
+    try {
+      const injected = sendCompactRef.current;
+      if (injected) {
+        await injected();
+        return;
+      }
+      await paseo.agents.ref(agentId).send("/compact", {
+        activeTurnBehavior: "steer",
+        messageId: `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      });
+      toast.show("命令已提交,完成后点刷新查看最新占用");
+      void reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "发送 /compact 失败");
+    } finally {
+      setCompacting(false);
+    }
+  }, [compacting, agentId, paseo, toast, reload]);
+
   // 排队消息出现在 timeline 后(回合开始处理)摘掉本地排队标记
   useEffect(() => {
     if (pendingQueue.length === 0) return;
@@ -525,14 +552,16 @@ export function AgentConsole({
           backgroundColor: theme.colors.surface2,
         },
         chipText: { color: theme.colors.foregroundMuted, fontSize: 11 },
-        ctxTrack: {
-          width: 64,
-          height: 4,
-          borderRadius: 2,
-          backgroundColor: theme.colors.surface0,
-          overflow: "hidden",
+        compactButton: {
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 4,
+          paddingHorizontal: 8,
+          paddingVertical: 3,
+          borderRadius: 999,
+          backgroundColor: theme.colors.surface2,
+          opacity: compacting ? 0.6 : 1,
         },
-        ctxFill: { height: 4, borderRadius: 2, backgroundColor: theme.colors.accent },
         attachments: {
           flexDirection: "row",
           gap: 6,
@@ -586,17 +615,21 @@ export function AgentConsole({
         },
         pickerRowText: { color: theme.colors.foreground, fontSize: 13, flex: 1 },
       }),
-    [theme, compact, height],
+    [theme, compact, height, compacting],
   );
 
   const currentThinking = extras?.thinkingOptions?.options.find(
     (option) => option.id === extras.thinkingOptionId,
   );
   const currentMode = extras?.modes.find((mode) => mode.id === extras.currentModeId);
-  const contextRatio =
-    extras && extras.contextUsed !== null && extras.contextMax
-      ? Math.min(1, extras.contextUsed / extras.contextMax)
-      : null;
+  // 异常数据不显示:used/max 缺失、非有限数或 max<=0 时返回 null(不假装 0%)
+  const contextRatio = (() => {
+    if (!extras || extras.contextUsed === null || !extras.contextMax) return null;
+    const used = extras.contextUsed;
+    const max = extras.contextMax;
+    if (!Number.isFinite(used) || !Number.isFinite(max) || max <= 0 || used < 0) return null;
+    return Math.min(1, used / max);
+  })();
 
   const blocks = useMemo(() => groupItems(items), [items]);
 
@@ -793,15 +826,31 @@ export function AgentConsole({
           </Pressable>
         ) : null}
         <View style={styles.chip}>
-          <View style={styles.ctxTrack}>
-            <View style={[styles.ctxFill, { width: `${Math.round((contextRatio ?? 0) * 100)}%` }]} />
-          </View>
+          {contextRatio !== null ? (
+            <ContextMeter
+              ratio={contextRatio}
+              trackColor={theme.colors.surface0}
+              progressColor={contextRatio > 0.85 ? theme.colors.statusDanger : theme.colors.accent}
+              size={14}
+              thickness={2.5}
+            />
+          ) : null}
           <Text style={styles.chipText}>
             {extras && extras.contextUsed !== null
               ? `${formatTokens(extras.contextUsed)}${extras.contextMax ? ` / ${formatTokens(extras.contextMax)}` : ""}`
               : "上下文 —"}
           </Text>
         </View>
+        <Pressable
+          style={styles.compactButton}
+          onPress={() => void handleCompact()}
+          disabled={compacting}
+          accessibilityRole="button"
+          accessibilityLabel="压缩上下文"
+        >
+          <Icon name="Eraser" size={12} color={theme.colors.foregroundMuted} />
+          <Text style={styles.chipText}>{compacting ? "压缩中…" : "压缩"}</Text>
+        </Pressable>
       </View>
 
       {images.length > 0 ? (
