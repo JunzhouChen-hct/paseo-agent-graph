@@ -603,7 +603,9 @@ export function AgentConsole({
           borderTopWidth: 1,
           borderTopColor: theme.colors.border,
           backgroundColor: theme.colors.surface1,
-          height,
+          height: compact ? undefined : height,
+          flex: compact ? 1 : undefined,
+          minHeight: 0,
         },
         grip: {
           alignItems: "center",
@@ -638,7 +640,7 @@ export function AgentConsole({
           marginLeft: -4,
           cursor: "pointer",
         },
-        headerButton: { padding: 4, borderRadius: 6 },
+        headerButton: { padding: 4, borderRadius: 6, minWidth: compact ? 44 : undefined, minHeight: compact ? 44 : undefined, justifyContent: "center", alignItems: "center" },
         // hover/pressed 高亮:同层级已有 surface2 的元素用 surface0 反差,扁平元素用 surface2
         hoverRaised: { backgroundColor: theme.colors.surface2, cursor: "pointer" },
         hoverInset: { backgroundColor: theme.colors.surface2 },
@@ -751,16 +753,16 @@ export function AgentConsole({
           fontSize: 12,
         },
         iconButton: {
-          width: 32,
-          height: 32,
+          width: compact ? 44 : 32,
+          height: compact ? 44 : 32,
           borderRadius: 8,
           alignItems: "center",
           justifyContent: "center",
           backgroundColor: theme.colors.surface2,
         },
         sendButton: {
-          width: 32,
-          height: 32,
+          width: compact ? 44 : 32,
+          height: compact ? 44 : 32,
           borderRadius: 8,
           alignItems: "center",
           justifyContent: "center",
@@ -896,7 +898,7 @@ export function AgentConsole({
 
   return (
     <View style={styles.root}>
-      <View
+      {!compact ? <View
         style={styles.grip}
         accessibilityLabel="拖动调整会话区高度"
         onStartShouldSetResponder={() => true}
@@ -917,7 +919,7 @@ export function AgentConsole({
         }}
       >
         <View style={styles.gripBar} />
-      </View>
+      </View> : null}
       <View style={styles.header}>
         <Icon name="MessagesSquare" size={13} color={theme.colors.foregroundMuted} />
         <FeedbackPressable
@@ -1101,10 +1103,10 @@ export function AgentConsole({
           value={draft}
           onChangeText={setDraft}
           multiline
-          placeholder="发送 prompt(Enter 发送,Shift+Enter 换行)"
+          placeholder={compact ? "输入消息，点击发送" : "发送 prompt(Enter 发送,Shift+Enter 换行)"}
           placeholderTextColor={theme.colors.foregroundMuted}
           onSubmitEditing={(event) => {
-            if (!(event.nativeEvent instanceof Object && (event.nativeEvent as { shiftKey?: boolean }).shiftKey)) {
+            if (!compact && !(event.nativeEvent instanceof Object && (event.nativeEvent as { shiftKey?: boolean }).shiftKey)) {
               void handleSend();
             }
           }}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
+import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { usePaseo, useRpc, useSettings, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { copyText, Icon, Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { cancelAgentRpc, debugReportRpc } from "../shared/graph";
@@ -32,7 +32,7 @@ const CARD_W_COMPACT = 164;
 // 原内容 + 两行元数据(思考/速度、分支) + 一行 workspace 标识的预留余量
 // + 上下文行(占用环 + used/max + 压缩按钮,约 17)
 const CARD_H = 148;
-const CARD_H_COMPACT = 148;
+const CARD_H_COMPACT = 184;
 const GAP_X = 26;
 const GAP_Y = 58;
 // 父卡片底部两侧各留的边距:多条边在该范围内分配唯一出线点
@@ -105,9 +105,12 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     return map;
   }, [visible, metas]);
 
-  const cardW = layout.compact ? CARD_W_COMPACT : CARD_W;
+  // 手机不强制两列；卡片略宽，底部操作按钮保留足够的触控面积。
+  const cardW = layout.compact
+    ? Math.min(240, Math.max(CARD_W_COMPACT, (measuredWidth || 360) - 40))
+    : CARD_W;
   const gapX = layout.compact ? 18 : GAP_X;
-  const maxRowWidth = Math.max((measuredWidth || 1200) - 24, cardW * 2 + gapX);
+  const maxRowWidth = Math.max((measuredWidth || 1200) - 24, layout.compact ? cardW : cardW * 2 + gapX);
   const layoutResult: LayoutResult = useMemo(
     () =>
       computeLayout(
@@ -395,7 +398,8 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
           alignItems: "center",
           gap: 4,
           paddingHorizontal: 8,
-          paddingVertical: 3,
+          paddingVertical: layout.compact ? 10 : 3,
+          minHeight: layout.compact ? 44 : undefined,
           borderRadius: 999,
           backgroundColor: showArchived ? theme.colors.surface2 : theme.colors.surface1,
         },
@@ -462,6 +466,33 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
         onBack={() => setView("graph")}
         openAgent={openAgent}
       />
+    );
+  }
+
+  // 窄屏进入会话/创建表单后使用整块可用区域，返回时目录与图布局仍保留。
+  if (layout.compact && selected) {
+    return (
+      <KeyboardAvoidingView
+        style={styles.screen}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        {createParent && createWorkspaceId ? (
+          <ScrollView style={{ flex: 1 }} keyboardShouldPersistTaps="handled">
+            <CreateAgentPanel
+              parentAgentId={createParent.id}
+              parentProvider={createParent.provider}
+              parentModel={createParent.model ?? undefined}
+              workspaceId={createWorkspaceId}
+              theme={theme}
+              compact
+              onDone={(newAgentId) => setSelected(newAgentId)}
+              onCancel={() => setSelected(null)}
+            />
+          </ScrollView>
+        ) : (
+          <AgentConsole agentId={selected} theme={theme} compact onCollapse={() => setSelected(null)} />
+        )}
+      </KeyboardAvoidingView>
     );
   }
 
@@ -623,6 +654,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                   >
                     <AgentCard
                       agentId={agent.id}
+                      compact={layout.compact}
                       fallbackTitle={agent.title}
                       fallbackProvider={agent.provider}
                       fallbackModel={agent.model}

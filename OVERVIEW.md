@@ -2,6 +2,8 @@
 
 以节点图的形式展示当前 project 全部 workspace 的 agent(含已归档)总览。每个 agent 是一张卡片并标注所属 workspace,父子关系自动连线(含跨工作区的原生父子),运行中的 agent 和交互中的连线带呼吸与流动动效,用于一眼看清任务派发流向并统一管理多个 agent。
 
+手机可以从工作区标题栏的“打开节点图”按钮进入（按钮较多时位于更多菜单），也可在命令中心搜索“节点图”。原生 iOS/Android 使用独立工作区标签；手机浏览器使用原标签及同样的窄屏布局。窄屏按可用宽度自动换行，卡片操作区加大，长按可复制 Agent ID。打开内置会话或创建子 Agent 时切换到完整视图，关闭后回到节点图。
+
 ## 工作方式
 
 展示范围由 workspace 级升级为 project 级:面板以当前 workspace 的真实 projectId 聚合该项目所有工作区的 agent。项目归属只用真实来源判定——join 用的 projectKey 以项目工作区描述符的 project.projectKey 为准(与 agent 目录 placement 同一键域),projects.list 返回的 registry key 仅作兜底(实测两者键域可能不同,registry key 可含 host 前缀与路径),agent 条目按 placement 的 project.projectKey 精确匹配,或按 workspaceId 与活跃工作区列表 join;不按 cwd 前缀猜测项目,也不假设 projectId 等于 projectKey。工作区列表来自 workspaces.list 的真实 projectId 过滤订阅,动态新增/移除工作区即时反映。已归档工作区的节点靠 projectKey 命中保留,卡片标识回落到目录 placement 的 workspaceName,归档开关不会因此静默丢节点。project 未解析完成前面板保持加载态,不会先展示全 host 的 agent。

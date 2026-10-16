@@ -29,6 +29,7 @@ export interface AgentContextUsage {
 
 export interface AgentCardProps {
   agentId: string;
+  compact?: boolean;
   /** 目录层数据,useAgent 不可用时的兜底显示。 */
   fallbackTitle: string | null;
   fallbackProvider: string;
@@ -98,6 +99,7 @@ function formatTokens(value: number): string {
 
 export const AgentCard = memo(function AgentCard({
   agentId,
+  compact = false,
   fallbackTitle,
   fallbackProvider,
   fallbackModel,
@@ -280,12 +282,13 @@ export const AgentCard = memo(function AgentCard({
           flexDirection: "row",
           alignItems: "center",
           gap: 4,
-          height: 13,
+          height: compact ? 28 : 13,
           marginTop: 1,
         },
         contextText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13, flexShrink: 1 },
         compactText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
         // 压缩按钮悬停/按下反馈
+        compactButton: { minHeight: compact ? 28 : undefined, justifyContent: "center", paddingHorizontal: compact ? 6 : 0 },
         compactHover: { backgroundColor: theme.colors.surface2, borderRadius: 4 },
         wsText: {
           flex: 1,
@@ -306,13 +309,15 @@ export const AgentCard = memo(function AgentCard({
           flex: 1,
           alignItems: "center",
           paddingVertical: 5,
+          minHeight: compact ? 44 : undefined,
+          justifyContent: "center",
           borderRadius: 6,
         },
         // 操作按钮悬停/按下反馈:底色微抬(与卡片 surface1 同系)
         actionHover: { backgroundColor: theme.colors.surface2 },
         actionDivider: { width: 1, backgroundColor: theme.colors.border },
       }),
-    [theme, selected, toneHex, animated],
+    [theme, selected, toneHex, animated, compact],
   );
 
   const title = live?.title ?? fallbackTitle ?? "未命名 Agent";
@@ -415,13 +420,14 @@ export const AgentCard = memo(function AgentCard({
               也不顺带 ack finished 关注;提交期间禁用,连点由 ref guard 同步拦截 */}
           {canCompact ? (
             <FeedbackPressable
+              style={styles.compactButton}
               hoverStyle={styles.compactHover}
               onPress={(event) => {
                 event.stopPropagation();
                 handleCompact();
               }}
               disabled={compactPending}
-              hitSlop={{ top: 5, bottom: 5, left: 4, right: 4 }}
+              hitSlop={{ top: compact ? 8 : 5, bottom: compact ? 8 : 5, left: 4, right: 4 }}
               accessibilityRole="button"
               accessibilityLabel="压缩上下文"
             >
