@@ -1,6 +1,6 @@
 import { Platform } from "react-native";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { contributeMobileEntry, graphPanelTarget } from "./client/mobile-entry";
+import { contributeMobileEntry, createWorkspaceGraphPanels, graphPanelTarget } from "./client/mobile-entry";
 import { GraphPanel } from "./client/panel";
 import { AgentGraphSettingsScreen } from "./client/settings-screen";
 
@@ -14,14 +14,15 @@ export default function contribute(client: PluginClientContext) {
     context: "workspace",
     Component: GraphPanel,
   });
+  const workspacePanels = createWorkspaceGraphPanels(client, target.id, GraphPanel);
   const stopCommand = client.addCommandCenterItem({
     id: "open-agent-graph",
     title: "Open Agent Graph",
     icon: "Workflow",
     keywords: ["agents", "graph", "节点图", "关系图"],
     context: "workspace",
-    onSelect({ openPanel }) {
-      openPanel(target.id, { location: target.location });
+    onSelect({ workspace }) {
+      workspacePanels.open(workspace.id);
     },
   });
   const stopSettings = client.addSettingsScreen({
@@ -30,9 +31,10 @@ export default function contribute(client: PluginClientContext) {
     icon: "Settings2",
     Component: AgentGraphSettingsScreen,
   });
-  const stopMobileEntry = contributeMobileEntry(client, target.id);
+  const stopMobileEntry = contributeMobileEntry(client, (workspaceId) => workspacePanels.open(workspaceId));
   return () => {
     stopMobileEntry();
+    workspacePanels.dispose();
     void stopPanel();
     void stopCommand();
     void stopSettings();

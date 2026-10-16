@@ -1,4 +1,5 @@
-import type { PluginClientContext } from "@getpaseo/plugin/client";
+import { createElement, type ComponentType } from "react";
+import type { PluginClientContext, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 
 /** 原生手机使用独立标签 ID，避免复用到历史上不可见的面板位置。
  * 桌面及手机浏览器保留原来的工作区标签；窄屏布局由 compact 决定。 */
@@ -6,8 +7,46 @@ export function graphPanelTarget(platform: string) {
   return { id: platform === "web" ? "agent-graph" : "agent-graph-mobile", location: "workspace" as const };
 }
 
+/** 面板标签的宿主身份只包含插件和面板 ID；为每个工作区分配独立身份。
+ * 编码不依赖随机数或字符替换，避免不同工作区被归一为同一个 ID。 */
+export function workspaceGraphPanelId(baseId: string, workspaceId: string): string {
+  return `${baseId}-ws-${Array.from(workspaceId, (char) => char.codePointAt(0)!.toString(16)).join("-")}`;
+}
+
+/** 只在首次打开时注册工作区专属面板，入口和命令中心共用。
+ * 渲染也绑定目标工作区，不能从旧标签的 props 继承到其他项目。 */
+export function createWorkspaceGraphPanels(
+  client: PluginClientContext,
+  baseId: string,
+  Component: ComponentType<PluginWorkspacePanelProps>,
+) {
+  const panels = new Map<string, ReturnType<PluginClientContext["addWorkspacePanel"]>>();
+  let stopped = false;
+  return {
+    open(workspaceId: string) {
+      if (stopped) return;
+      const targetWorkspaceId = workspaceId.trim();
+      if (!targetWorkspaceId) throw new Error("无法确定节点图所属工作区");
+      const id = workspaceGraphPanelId(baseId, targetWorkspaceId);
+      if (!panels.has(id)) {
+        panels.set(id, client.addWorkspacePanel({
+          id, title: "Agent Graph", icon: "Workflow", context: "workspace", locations: ["workspace"],
+          Component: (props) => createElement(Component, { ...props, workspaceId: targetWorkspaceId }),
+        }));
+      }
+      client.openPanel(id, { workspaceId: targetWorkspaceId, location: "workspace" });
+    },
+    dispose() {
+      if (stopped) return;
+      stopped = true;
+      for (const cleanup of panels.values()) void cleanup();
+      panels.clear();
+    },
+  };
+}
+
 /** 给手机的每个工作区提供快捷入口；只观察目录，不创建工作区或会话。 */
-export function contributeMobileEntry(client: PluginClientContext, panelId: string) {
+export function contributeMobileEntry(client: PluginClientContext, openWorkspaceGraph: (workspaceId: string) => void) {
   const buttons = new Map<string, ReturnType<PluginClientContext["addHeaderButton"]>>();
   let stopped = false;
   let generation = 0;
@@ -24,7 +63,7 @@ export function contributeMobileEntry(client: PluginClientContext, panelId: stri
         id: "open-agent-graph", workspaceId: id,
         button: {
           title: "打开节点图", icon: "Workflow", label: "节点图",
-          behavior: { kind: "action", onPress: () => client.openPanel(panelId, { workspaceId: id, location: "workspace" }) },
+          behavior: { kind: "action", onPress: () => openWorkspaceGraph(id) },
         },
       }));
     }
