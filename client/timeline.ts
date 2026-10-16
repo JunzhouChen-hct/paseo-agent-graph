@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePaseo } from "@getpaseo/plugin/client";
 
 /** mini 交互界面里的一条对话行。 */
@@ -133,8 +133,12 @@ export function useAgentTimeline(
   const [extras, setExtras] = useState<AgentExtras | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 请求序号:agentId 切换时旧 fetch 可能晚于新 fetch 返回,过期响应直接丢弃,
+  // 避免把上个会话的 items/extras(含上下文占用)误显示给新会话
+  const reloadSeqRef = useRef(0);
 
   const reload = useCallback(async () => {
+    const seq = ++reloadSeqRef.current;
     if (!agentId) {
       setItems([]);
       setExtras(null);
@@ -146,6 +150,7 @@ export function useAgentTimeline(
       const payload: TimelinePayloadLike = await paseo.agents
         .ref(agentId)
         .timeline.refetch({ direction: "tail", limit, projection: "projected" });
+      if (seq !== reloadSeqRef.current) return;
       const views: TimelineView[] = [];
       (payload.entries ?? []).forEach((entry, index) => {
         const view = viewOfItem(entry.item, index, entry.timestamp);
@@ -154,13 +159,17 @@ export function useAgentTimeline(
       setItems(views);
       setExtras(extractExtras(payload));
     } catch (err) {
+      if (seq !== reloadSeqRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (seq === reloadSeqRef.current) setLoading(false);
     }
   }, [paseo, agentId, limit]);
 
   useEffect(() => {
+    // 切换 agent 时先清掉上个会话的数据,避免新会话短暂显示旧占用
+    setItems([]);
+    setExtras(null);
     void reload();
   }, [reload]);
 
