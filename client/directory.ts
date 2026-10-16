@@ -108,8 +108,9 @@ export function useProjectAgentDirectory(workspaceId: string): ProjectAgentDirec
         if (match?.projectKey) setResolvedProjectKey(match.projectKey);
         // 缺 projectKey 时不报错:工作区描述符的 project.projectKey 是第二来源
       })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(errorText(err));
+      .catch(() => {
+        // 解析失败不直接报错:工作区描述符兜底仍可能拿到 key;
+        // 两路都拿不到时由 projectKeyMissing 统一给出准确错误,避免误伤 ready 状态
       });
 
     // ---- 工作区目录:真实 projectId 过滤 + 分页 + 订阅动态增删 ----
