@@ -41,7 +41,9 @@ export function FeedbackPressable({ style, hoverStyle, pressStyle, ...rest }: Fe
         const base = typeof style === "function" ? style(state) : style;
         const hover = showHover ? hoverStyle : null;
         const press = state.pressed && !disabled ? (pressStyle ?? hoverStyle) : null;
-        return [{ cursor: "pointer" }, base, hover, press];
+        // 光标在 base 之后合成:disabled 显式 auto(不可点击处不出手指,
+        // 并遮盖可 pointer 父容器继承下来的 pointer),base 自带的 cursor 也不会覆盖它
+        return [base, { cursor: disabled ? "auto" : "pointer" }, hover, press];
       }}
     />
   );
