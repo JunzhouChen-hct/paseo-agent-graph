@@ -3,9 +3,15 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractAgentMetadata, SPEED_FEATURE_ID } from "../shared/agent-metadata";
-import { handleAgentMetadata } from "../server/agent-metadata";
-import type { AgentMetadataSnapshotLite } from "../shared/agent-metadata";
+import {
+  DETACHED_BRANCH_LABEL,
+  METADATA_BATCH_SIZE,
+  extractAgentMetadata,
+  mergeBatchResults,
+  splitBatches,
+} from "../shared/agent-metadata";
+import type { AgentMetadataSnapshotLite, AgentNodeMetadata } from "../shared/agent-metadata";
+import { handleAgentMetadata, type BranchResolver } from "../server/agent-metadata";
 
 /** 便捷构造完整快照的默认字段 */
 function makeSnapshot(overrides: Partial<AgentMetadataSnapshotLite> = {}): AgentMetadataSnapshotLite {
@@ -26,27 +32,55 @@ const SPEED_OPTIONS = [
   { id: "priority", label: "Fast" },
 ];
 
+/** stub 解析器:记录查询目录,按映射返回结果("detached"→detached,未命中→unavailable) */
+function stubResolver(byDir: Record<string, string>): BranchResolver & { dirs: string[] } {
+  const dirs: string[] = [];
+  const resolver = (async (dir: string) => {
+    dirs.push(dir);
+    const branch = byDir[dir];
+    if (branch === "detached") return { status: "detached" as const };
+    if (branch === undefined) return { status: "unavailable" as const };
+    return { status: "ok" as const, branch };
+  }) as BranchResolver & { dirs: string[] };
+  resolver.dirs = dirs;
+  return resolver;
+}
+
 test("提取:Codex 速度 select 按真实 descriptor value 取当前 label", () => {
   const metadata = extractAgentMetadata(
     makeSnapshot({
       features: [
-        {
-          type: "select",
-          id: SPEED_FEATURE_ID,
-          label: "Speed",
-          value: "priority",
-          options: SPEED_OPTIONS,
-        },
+        { type: "select", id: "service_tier", label: "Speed", value: "priority", options: SPEED_OPTIONS },
       ],
     }),
   );
   assert.deepEqual(metadata.speed, { value: "priority", label: "Fast" });
 });
 
+test("提取:label 含 speed 的 select 同样识别", () => {
+  const metadata = extractAgentMetadata(
+    makeSnapshot({
+      features: [{ type: "select", id: "tier", label: "Model speed", value: "default", options: SPEED_OPTIONS }],
+    }),
+  );
+  assert.deepEqual(metadata.speed, { value: "default", label: "Normal" });
+});
+
+test("提取:速度 toggle 打开/关闭按实际 value 展示,不用 catalog 默认", () => {
+  const on = extractAgentMetadata(
+    makeSnapshot({ features: [{ type: "toggle", id: "fast_speed", label: "Fast speed", value: true }] }),
+  );
+  assert.deepEqual(on.speed, { value: "on", label: "开启" });
+  const off = extractAgentMetadata(
+    makeSnapshot({ features: [{ type: "toggle", id: "fast_speed", label: "Fast speed", value: false }] }),
+  );
+  assert.deepEqual(off.speed, { value: "off", label: "关闭" });
+});
+
 test("提取:速度 value 无法匹配 options 时回退展示原始 value", () => {
   const metadata = extractAgentMetadata(
     makeSnapshot({
-      features: [{ type: "select", id: SPEED_FEATURE_ID, label: "Speed", value: "turbo", options: SPEED_OPTIONS }],
+      features: [{ type: "select", id: "service_tier", label: "Speed", value: "turbo", options: SPEED_OPTIONS }],
     }),
   );
   assert.deepEqual(metadata.speed, { value: "turbo", label: "turbo" });
@@ -55,7 +89,10 @@ test("提取:速度 value 无法匹配 options 时回退展示原始 value", () 
 test("提取:速度 value 为 null 表示未知 → 不展示", () => {
   const metadata = extractAgentMetadata(
     makeSnapshot({
-      features: [{ type: "select", id: SPEED_FEATURE_ID, label: "Speed", value: null, options: SPEED_OPTIONS }],
+      features: [
+        { type: "select", id: "service_tier", label: "Speed", value: null, options: SPEED_OPTIONS },
+        { type: "toggle", id: "fast_speed", label: "Fast speed", value: null },
+      ],
     }),
   );
   assert.equal(metadata.speed, null);
@@ -66,7 +103,7 @@ test("提取:features 为空(Claude 实测)→ 无速度", () => {
   assert.equal(metadata.speed, null);
 });
 
-test("提取:toggle 与无关 select 不当速度(plan_mode 不是速度)", () => {
+test("提取:auto_accept toggle 与 plan_mode select 等权限类 descriptor 不当速度", () => {
   const metadata = extractAgentMetadata(
     makeSnapshot({
       features: [
@@ -110,6 +147,52 @@ test("提取:空字符串视为未报告", () => {
   assert.equal(metadata.thinking, null);
 });
 
+test("分片:201 与 450 条按 200 上限切片", () => {
+  const ids201 = Array.from({ length: 201 }, (_, index) => `agent-${index}`);
+  assert.deepEqual(
+    splitBatches(ids201).map((batch) => batch.length),
+    [200, 1],
+  );
+  const ids450 = Array.from({ length: 450 }, (_, index) => `agent-${index}`);
+  assert.deepEqual(
+    splitBatches(ids450).map((batch) => batch.length),
+    [200, 200, 50],
+  );
+  assert.equal(splitBatches([], METADATA_BATCH_SIZE).length, 0);
+});
+
+/** 构造一批 RPC 结果页 */
+function page(ids: string[]): { items: Record<string, AgentNodeMetadata | null> } {
+  const items: Record<string, AgentNodeMetadata | null> = {};
+  for (const id of ids) {
+    items[id] = { thinking: { value: id, source: "effective" }, speed: null, branch: null };
+  }
+  return { items };
+}
+
+test("合并:450 条三批结果全部合并", () => {
+  const ids = Array.from({ length: 450 }, (_, index) => `agent-${index}`);
+  const batches = splitBatches(ids);
+  const settled = batches.map((batch) => ({ status: "fulfilled" as const, value: page(batch) }));
+  const { items, failedBatches } = mergeBatchResults(batches, settled);
+  assert.equal(failedBatches, 0);
+  assert.equal(Object.keys(items).length, 450);
+});
+
+test("合并:单批失败不影响其他批,失败批数可见", () => {
+  const ids = Array.from({ length: 201 }, (_, index) => `agent-${index}`);
+  const batches = splitBatches(ids);
+  const settled = [
+    { status: "fulfilled" as const, value: page(batches[0]) },
+    { status: "rejected" as const, reason: new Error("daemon 不可达") },
+  ];
+  const { items, failedBatches } = mergeBatchResults(batches, settled);
+  assert.equal(failedBatches, 1);
+  assert.equal(Object.keys(items).length, 200);
+  assert.equal(items["agent-199"]?.thinking?.value, "agent-199");
+  assert.equal(items["agent-200"], undefined);
+});
+
 function makePaseo(snapshots: Record<string, object | null>) {
   const refreshCalls: string[] = [];
   return {
@@ -138,22 +221,13 @@ test("handler:组装思考/速度/分支,分支取自提示 label 指向目录",
         id: "agent-a",
         thinkingOptionId: "high",
         effectiveThinkingOptionId: "xhigh",
-        features: [{ type: "select", id: SPEED_FEATURE_ID, label: "Speed", value: "priority", options: SPEED_OPTIONS }],
+        features: [{ type: "select", id: "service_tier", label: "Speed", value: "priority", options: SPEED_OPTIONS }],
         labels: { "agent-graph.worktree-cwd": hintDir },
       }),
     });
-    const resolvedDirs: string[] = [];
-    const result = await handleAgentMetadata(
-      { agentIds: ["agent-a"] },
-      { paseo },
-      {
-        branchResolver: async (dir) => {
-          resolvedDirs.push(dir);
-          return dir === hintDir ? "feature/agent-node-metadata" : "main";
-        },
-      },
-    );
-    assert.deepEqual(resolvedDirs, [hintDir], "优先用提示 label 路径,而不是 cwd");
+    const resolver = stubResolver({ [hintDir]: "feature/agent-node-metadata", ["/tmp/repo"]: "main" });
+    const result = await handleAgentMetadata({ agentIds: ["agent-a"] }, { paseo }, { branchResolver: resolver });
+    assert.deepEqual(resolver.dirs, [hintDir], "优先用提示 label 路径,而不是 cwd");
     assert.deepEqual(result.items["agent-a"], {
       thinking: { value: "xhigh", source: "effective" },
       speed: { value: "priority", label: "Fast" },
@@ -164,7 +238,27 @@ test("handler:组装思考/速度/分支,分支取自提示 label 指向目录",
   }
 });
 
-test("handler:刷新失败/无快照 → 该 agent 显式 null,不影响其余", async () => {
+test("handler:提示目录 detached → 明确 detached,不回退 cwd 主仓库分支", async () => {
+  const hintDir = mkdtempSync(join(tmpdir(), "paseo-agent-graph-detached-"));
+  try {
+    const { paseo } = makePaseo({
+      "agent-b": makeSnapshot({
+        id: "agent-b",
+        cwd: "/tmp/main-repo",
+        labels: { "agent-graph.worktree-cwd": hintDir },
+      }),
+    });
+    const resolver = stubResolver({ [hintDir]: "detached", ["/tmp/main-repo"]: "main" });
+    const result = await handleAgentMetadata({ agentIds: ["agent-b"] }, { paseo }, { branchResolver: resolver });
+    assert.deepEqual(resolver.dirs, [hintDir], "detached 时不得再查 cwd");
+    assert.equal(result.items["agent-b"]?.branch, DETACHED_BRANCH_LABEL);
+    assert.notEqual(result.items["agent-b"]?.branch, "main");
+  } finally {
+    rmSync(hintDir, { recursive: true, force: true });
+  }
+});
+
+test("handler:提示失效回退 cwd,刷新失败/无快照 → 显式 null", async () => {
   const { paseo } = makePaseo({
     "agent-bad": null,
     "agent-ok": makeSnapshot({ id: "agent-ok", thinkingOptionId: "low" }),
@@ -172,7 +266,7 @@ test("handler:刷新失败/无快照 → 该 agent 显式 null,不影响其余",
   const result = await handleAgentMetadata(
     { agentIds: ["agent-bad", "agent-ok"] },
     { paseo },
-    { branchResolver: async () => null },
+    { branchResolver: stubResolver({}) },
   );
   assert.equal(result.items["agent-bad"], null);
   assert.deepEqual(result.items["agent-ok"]?.thinking, { value: "low", source: "configured" });

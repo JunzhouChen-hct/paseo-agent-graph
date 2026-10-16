@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { pickSpeedFeature } from "./provider-speed";
 
 /**
  * 节点卡片元数据:模型思考强度 / 速度模式 / 对应开发分支。
@@ -7,15 +8,14 @@ import { z } from "zod";
  * 数据来源约定:
  * - 思考强度:完整快照的 effectiveThinkingOptionId 优先,其次 thinkingOptionId,
  *   最后 runtimeInfo.thinkingOptionId;三者皆无表示 provider 未报告,展示为空。
- * - 速度模式:快照自带的 features descriptor(Codex 速度 select 的 id 为
- *   service_tier,value 即当前速度)。不调用 listFeatures,也不用默认
- *   catalog value 冒充实际速度;descriptor 缺失或 value 为 null 表示不支持/未知。
+ * - 速度模式:复用 shared/provider-speed.ts 的 pickSpeedFeature 统一识别
+ *   (service_tier select 及 id/label 含 "speed" 的 toggle/select),
+ *   展示快照 descriptor 的实际 value:toggle true→开启 / false→关闭,
+ *   select 取已选 option label;value 为 null 表示未知,不展示,
+ *   不调用 listFeatures 也不用 catalog 默认值冒充实际速度。
  * - 开发分支:由 server 端从 worktree 提示 label 或 agent.cwd 的真实 git 查询得出,
  *   提取函数先占位为 null,server 覆盖。
  */
-
-/** Codex 在 features 里报告速度模式的真实 select descriptor id(实测确认)。 */
-export const SPEED_FEATURE_ID = "service_tier";
 
 /** 完整快照中与节点元数据相关的最小结构:宽进,缺失字段按未知处理。 */
 export interface AgentFeatureLite {
@@ -61,11 +61,17 @@ export const agentMetadataItemSchema = z.object({
   branch: z.string().nullable(),
 });
 
+/** 单次 RPC 允许的最大 agent 数(daemon 侧 input 校验同款上限),客户端按此分片。 */
+export const METADATA_BATCH_SIZE = 200;
+
 export const agentMetadataRpc = defineRpc({
   name: "agent-graph.metadata",
-  input: z.object({ agentIds: z.array(z.string().min(1)).max(200) }),
+  input: z.object({ agentIds: z.array(z.string().min(1)).max(METADATA_BATCH_SIZE) }),
   output: z.object({ items: z.record(z.string(), agentMetadataItemSchema.nullable()) }),
 });
+
+/** detached HEAD 的明确展示值:hint/cwd 是 git 仓库但当前无分支名可报。 */
+export const DETACHED_BRANCH_LABEL = "detached HEAD";
 
 function firstThinking(
   snapshot: AgentMetadataSnapshotLite,
@@ -83,29 +89,66 @@ function firstThinking(
   return null;
 }
 
+/** 速度 descriptor 实际 value → 展示值;未报告(null/空)返回 null,不冒充默认。 */
+function speedDisplay(feature: ReturnType<typeof pickSpeedFeature>): { value: string; label: string } | null {
+  if (!feature) return null;
+  if (feature.type === "toggle") {
+    if (feature.value === true) return { value: "on", label: "开启" };
+    if (feature.value === false) return { value: "off", label: "关闭" };
+    return null; // toggle value 未知(null)→ 不展示
+  }
+  const value = feature.value;
+  if (typeof value !== "string" || !value) return null;
+  // value 无法匹配 options 时退回展示原始 value,明确可见而不是静默丢弃
+  const option = (feature.options ?? []).find((candidate) => candidate.id === value);
+  return { value, label: option?.label ?? value };
+}
+
 /**
  * 从完整 agent 快照提取卡片元数据(不含分支,分支由 server 端 git 查询得出)。
  * 纯函数,不发起任何 RPC。
  */
 export function extractAgentMetadata(snapshot: AgentMetadataSnapshotLite): AgentNodeMetadata {
   const thinking = firstThinking(snapshot);
-
-  // 速度模式只认真实 descriptor;toggle 与未知 id 的 select 一律不当速度,
-  // 避免 plan_mode 之类的无关开关被误展示。
-  const speedFeature = (snapshot.features ?? []).find(
-    (feature) => feature.type === "select" && feature.id === SPEED_FEATURE_ID,
-  );
-  const speedValue =
-    speedFeature && typeof speedFeature.value === "string" && speedFeature.value
-      ? speedFeature.value
-      : null;
-  // value 无法匹配 options 时退回展示原始 value,明确可见而不是静默丢弃
-  const speedOption = speedValue
-    ? (speedFeature?.options ?? []).find((option) => option.id === speedValue)
-    : undefined;
-  const speed = speedValue
-    ? { value: speedValue, label: speedOption?.label ?? speedValue }
-    : null;
-
+  // 速度识别统一走 pickSpeedFeature(基于真实 descriptor,含 toggle 形态);
+  // auto_accept / plan_mode 等权限类 descriptor 不会被误判为速度。
+  const speed = speedDisplay(pickSpeedFeature(snapshot.features ?? []));
   return { thinking, speed, branch: null };
+}
+
+/** 按 RPC 单次上限把 agentIds 切成若干批,空数组返回空批列表。 */
+export function splitBatches(ids: readonly string[], size: number = METADATA_BATCH_SIZE): string[][] {
+  const batches: string[][] = [];
+  for (let index = 0; index < ids.length; index += size) {
+    batches.push(ids.slice(index, index + size));
+  }
+  return batches;
+}
+
+export type MetadataBatchPage = { items: Record<string, AgentNodeMetadata | null> };
+export type MetadataBatchResult = PromiseSettledResult<MetadataBatchPage>;
+
+/**
+ * 合并多批 RPC 结果:仅成功批次的条目参与合并,失败批次的 agent 不出现在
+ * 返回值里(由调用方沿用上次结果),同时给出失败批次数供限频上报。
+ * 纯函数,供 client hook 与测试共用。
+ */
+export function mergeBatchResults(
+  batches: readonly (readonly string[])[],
+  settled: readonly MetadataBatchResult[],
+): { items: Record<string, AgentNodeMetadata>; failedBatches: number } {
+  const items: Record<string, AgentNodeMetadata> = {};
+  let failedBatches = 0;
+  batches.forEach((batch, index) => {
+    const result = settled[index];
+    if (!result || result.status !== "fulfilled") {
+      failedBatches += 1;
+      return;
+    }
+    for (const [agentId, value] of Object.entries(result.value.items ?? {})) {
+      const metadata = value ?? null;
+      if (metadata) items[agentId] = metadata;
+    }
+  });
+  return { items, failedBatches };
 }
