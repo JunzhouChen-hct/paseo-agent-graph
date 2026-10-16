@@ -30,9 +30,13 @@ export interface AgentCardProps {
   workspaceLabel?: string | null;
   selected: boolean;
   canOpenAgent: boolean;
+  /** 移动端长按补充复制;web 桌面用右键 */
+  enableLongPressCopy: boolean;
   statusColors: StatusColors;
   theme: PluginTheme;
   onPress(): void;
+  /** 右键/长按:复制 Agent ID(反馈由面板统一 toast) */
+  onCopyId(): void;
   onMeta(agentId: string, meta: CardMeta): void;
   onOpenAgent(): void;
   onCreateChild(): void;
@@ -85,9 +89,11 @@ export const AgentCard = memo(function AgentCard({
   workspaceLabel,
   selected,
   canOpenAgent,
+  enableLongPressCopy,
   statusColors,
   theme,
   onPress,
+  onCopyId,
   onMeta,
   onOpenAgent,
   onCreateChild,
@@ -175,11 +181,12 @@ export const AgentCard = memo(function AgentCard({
           backgroundColor: theme.colors.surface1,
           overflow: "hidden",
         },
-        // 唯一的呼吸边框:宽度与本体边框一致,半径按边框宽度内缩保持同心
+        // 唯一的呼吸边框:3px 单环,半径按边框宽度内缩保持同心(12-3=9),
+        // 内容与本体不动,只有环的透明度呼吸;归档(muted)不挂环
         pulseRing: {
           ...StyleSheet.absoluteFillObject,
-          borderRadius: selected ? 10 : 11,
-          borderWidth: selected ? 2 : 1,
+          borderRadius: 9,
+          borderWidth: 3,
           borderColor: toneHex,
         },
         body: {
@@ -248,7 +255,20 @@ export const AgentCard = memo(function AgentCard({
       : STATUS_LABEL[status] ?? status;
 
   return (
-    <Pressable onPress={onPress} style={[styles.card, { opacity }]} accessibilityRole="button">
+    <Pressable
+      onPress={onPress}
+      onLongPress={enableLongPressCopy ? onCopyId : undefined}
+      // 桌面右键:RN PointerEvent 继承 MouseEvent.button,2=右键;
+      // 阻断冒泡避免触发选中/打开;右键不产生 click,onPress 不会被触发
+      onPointerDown={(event) => {
+        if (event.nativeEvent.button === 2) {
+          event.stopPropagation();
+          onCopyId();
+        }
+      }}
+      style={[styles.card, { opacity }]}
+      accessibilityRole="button"
+    >
       {animated && !archived ? (
         <Animated.View
           pointerEvents="none"

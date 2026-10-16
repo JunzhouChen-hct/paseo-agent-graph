@@ -1,6 +1,6 @@
 /**
- * 边曲线几何纯逻辑:三次贝塞尔曲线构建、弧长参数化、采样、
- * 线段视图(供 RN View+rotate 绘制)与同父出线点分配。
+ * 边曲线几何纯逻辑:贝塞尔/折线圆角路径的采样与弧长参数化、
+ * 线段视图(供 RN View+rotate 绘制)、折线简化与同父出线点分配。
  * 不依赖 React / React Native,可被 client 与 tests 共用。
  */
 
@@ -9,7 +9,15 @@ export interface Point {
   y: number;
 }
 
-export interface EdgeCurve {
+/** 采样后的路径:折线点、累计弧长(严格递增)、总弧长 */
+export interface SampledPath {
+  points: Point[];
+  cumulative: number[];
+  total: number;
+}
+
+/** 三次贝塞尔直连曲线 */
+export interface EdgeCurve extends SampledPath {
   /** 曲线起点(父卡片底部出线点) */
   from: Point;
   /** 曲线终点(子卡片顶部中点) */
@@ -17,12 +25,6 @@ export interface EdgeCurve {
   /** 三次贝塞尔控制点 */
   cp1: Point;
   cp2: Point;
-  /** 采样点(含 from、to 两端) */
-  points: Point[];
-  /** 每个采样点处的累计弧长,与 points 等长,严格递增 */
-  cumulative: number[];
-  /** 曲线总弧长 */
-  total: number;
 }
 
 /** 流点动画插值所需的 inputRange/outputRange(inputRange 严格递增) */
@@ -60,31 +62,6 @@ export function cubicBezierPoint(p0: Point, p1: Point, p2: Point, p3: Point, t: 
   };
 }
 
-/**
- * 构建“竖直切出”的三次贝塞尔曲线:两端切线均竖直,
- * 控制距离随垂直距离缩放并夹在 [20, 90],曲线平滑无折角。
- * 垂直距离过小(甚至子卡片在父卡片上方)时控制距离取下限,
- * 保证控制点有限、采样无 NaN。
- */
-export function buildEdgeCurve(from: Point, to: Point): EdgeCurve {
-  const dy = to.y - from.y;
-  // 两端完全重合时控制距离取 0,曲线收敛为一点(全零长退化路径)
-  const control =
-    from.x === to.x && dy === 0 ? 0 : Math.min(90, Math.max(20, Math.abs(dy) * 0.45));
-  const cp1: Point = { x: from.x, y: from.y + control };
-  const cp2: Point = { x: to.x, y: to.y - control };
-
-  // 先粗采样估弧长,再按目标段长(约 10px)决定正式采样数
-  const estimate = samplePoints(from, cp1, cp2, to, 12);
-  const approx = polylineLength(estimate);
-  const segments = Math.min(48, Math.max(8, Math.ceil(approx / 10)));
-  const points = samplePoints(from, cp1, cp2, to, segments);
-  const cumulative = cumulativeLengths(points);
-  // 全零弧长(重合点)时夹一个极小值,保证 inputRange 严格递增不产生 NaN
-  const total = cumulative[cumulative.length - 1] ?? 0;
-  return { from, to, cp1, cp2, points, cumulative, total };
-}
-
 function samplePoints(p0: Point, p1: Point, p2: Point, p3: Point, segments: number): Point[] {
   const list: Point[] = [];
   for (let i = 0; i <= segments; i++) {
@@ -114,26 +91,181 @@ function cumulativeLengths(points: Point[]): number[] {
   return list;
 }
 
+/** 点到线段的最短距离(Douglas-Peucker 用) */
+function pointSegmentDistance(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq < 1e-12) return Math.hypot(p.x - a.x, p.y - a.y);
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSq;
+  t = Math.min(Math.max(t, 0), 1);
+  return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+}
+
+/**
+ * Douglas-Peucker 折线简化:在容差内合并共线采样点,
+ * 大幅减少渲染线段数(接缝与视图数量同步下降),保留端点。
+ */
+export function simplifyPolyline(points: readonly Point[], tolerance: number): Point[] {
+  if (points.length <= 2) return [...points];
+  const keep = new Array<boolean>(points.length).fill(false);
+  keep[0] = true;
+  keep[points.length - 1] = true;
+  const stack: Array<[number, number]> = [[0, points.length - 1]];
+  while (stack.length > 0) {
+    const [lo, hi] = stack.pop()!;
+    if (hi - lo < 2) continue;
+    const a = points[lo]!;
+    const b = points[hi]!;
+    let maxDist = -1;
+    let maxIndex = -1;
+    for (let i = lo + 1; i < hi; i++) {
+      const dist = pointSegmentDistance(points[i]!, a, b);
+      if (dist > maxDist) {
+        maxDist = dist;
+        maxIndex = i;
+      }
+    }
+    if (maxDist > tolerance && maxIndex > 0) {
+      keep[maxIndex] = true;
+      stack.push([lo, maxIndex], [maxIndex, hi]);
+    }
+  }
+  return points.filter((_, index) => keep[index]);
+}
+
+/**
+ * 构建“竖直切出”的三次贝塞尔直连曲线:两端切线均竖直,
+ * 控制距离随垂直距离缩放并夹在 [20, 90]。
+ * 采样后做 DP 简化(容差 0.4px):相邻简化段共享端点,
+ * 配合圆头渲染即成圆角接缝(见 buildSegmentViews)。
+ */
+export function buildEdgeCurve(from: Point, to: Point): EdgeCurve {
+  const dy = to.y - from.y;
+  // 两端完全重合时控制距离取 0,曲线收敛为一点(全零长退化路径)
+  const control =
+    from.x === to.x && dy === 0 ? 0 : Math.min(90, Math.max(20, Math.abs(dy) * 0.45));
+  const cp1: Point = { x: from.x, y: from.y + control };
+  const cp2: Point = { x: to.x, y: to.y - control };
+
+  // 先粗采样估弧长,再按目标段长(约 10px)决定正式采样数
+  const estimate = samplePoints(from, cp1, cp2, to, 12);
+  const approx = polylineLength(estimate);
+  const segments = Math.min(64, Math.max(8, Math.ceil(approx / 10)));
+  const raw = samplePoints(from, cp1, cp2, to, segments);
+  const points = simplifyPolyline(raw, 0.4);
+  const cumulative = cumulativeLengths(points);
+  // 全零弧长(重合点)时夹一个极小值,保证 inputRange 严格递增不产生 NaN
+  const total = cumulative[cumulative.length - 1] ?? 0;
+  return { from, to, cp1, cp2, points, cumulative, total };
+}
+
+/**
+ * 把路径航点(折线拐点)转成圆角采样路径:每个内拐角用二次贝塞尔圆角,
+ * 直段保持直线。直线与圆角统一进 points/cumulative/total,
+ * 渲染层(静态线与流点)消费同一份采样,保证流点严格贴线。
+ * filletRadius 会被相邻直段长度收缩,直段过短时退化为尖角。
+ */
+export function buildPathCurve(waypoints: readonly Point[], filletRadius = 14): SampledPath {
+  // 去掉连续重复点
+  const pts: Point[] = [];
+  for (const point of waypoints) {
+    const prev = pts[pts.length - 1];
+    if (!prev || Math.hypot(point.x - prev.x, point.y - prev.y) > 1e-9) pts.push(point);
+  }
+  if (pts.length === 0) {
+    return { points: [], cumulative: [], total: 0 };
+  }
+  if (pts.length === 1) {
+    return { points: [pts[0]!, { ...pts[0]! }], cumulative: [0, CUMULATIVE_EPS], total: CUMULATIVE_EPS };
+  }
+  if (pts.length === 2) {
+    return {
+      points: [pts[0]!, pts[1]!],
+      cumulative: cumulativeLengths([pts[0]!, pts[1]!]),
+      total: Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y),
+    };
+  }
+
+  const FILLET_SAMPLES = 8;
+  const points: Point[] = [pts[0]!];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const prev = pts[i - 1]!;
+    const corner = pts[i]!;
+    const next = pts[i + 1]!;
+    const inLeg = Math.hypot(corner.x - prev.x, corner.y - prev.y);
+    const outLeg = Math.hypot(next.x - corner.x, next.y - corner.y);
+    const radius = Math.min(filletRadius, inLeg / 2 - 0.01, outLeg / 2 - 0.01);
+    if (radius <= 0.5) {
+      points.push(corner); // 直段太短,保留尖角
+      continue;
+    }
+    const inPoint: Point = {
+      x: corner.x - ((corner.x - prev.x) / inLeg) * radius,
+      y: corner.y - ((corner.y - prev.y) / inLeg) * radius,
+    };
+    const outPoint: Point = {
+      x: corner.x + ((next.x - corner.x) / outLeg) * radius,
+      y: corner.y + ((next.y - corner.y) / outLeg) * radius,
+    };
+    points.push(inPoint);
+    const inDir: Point = { x: (corner.x - prev.x) / inLeg, y: (corner.y - prev.y) / inLeg };
+    const outDir: Point = { x: (next.x - corner.x) / outLeg, y: (next.y - corner.y) / outLeg };
+    const dot = inDir.x * outDir.x + inDir.y * outDir.y;
+    if (Math.abs(dot) < 1e-9) {
+      // 垂直拐角:采样真实圆弧(圆心 = 切点 + 出方向×半径),
+      // 与原生圆角转弯渲染精确一致,流点消费同一弧线
+      const center: Point = { x: inPoint.x + outDir.x * radius, y: inPoint.y + outDir.y * radius };
+      const angle0 = Math.atan2(inPoint.y - center.y, inPoint.x - center.x);
+      let delta = Math.atan2(outPoint.y - center.y, outPoint.x - center.x) - angle0;
+      while (delta > Math.PI) delta -= 2 * Math.PI;
+      while (delta < -Math.PI) delta += 2 * Math.PI;
+      for (let s = 1; s <= FILLET_SAMPLES; s++) {
+        const angle = angle0 + (delta * s) / FILLET_SAMPLES;
+        points.push({
+          x: center.x + Math.cos(angle) * radius,
+          y: center.y + Math.sin(angle) * radius,
+        });
+      }
+    } else {
+      // 非垂直拐角:二次贝塞尔圆角(控制点=拐角)
+      for (let s = 1; s <= FILLET_SAMPLES; s++) {
+        const t = s / FILLET_SAMPLES;
+        const u = 1 - t;
+        points.push({
+          x: u * u * inPoint.x + 2 * u * t * corner.x + t * t * outPoint.x,
+          y: u * u * inPoint.y + 2 * u * t * corner.y + t * t * outPoint.y,
+        });
+      }
+    }
+  }
+  points.push(pts[pts.length - 1]!);
+
+  const cumulative = cumulativeLengths(points);
+  const total = cumulative[cumulative.length - 1] ?? 0;
+  return { points, cumulative, total };
+}
+
 /**
  * 弧长 → 曲线上的点(线性插值,近似匀速)。s 越界时夹在 [0, total]。
  */
-export function pointAtLength(curve: EdgeCurve, s: number): Point {
-  const total = curve.total;
+export function pointAtLength(path: SampledPath, s: number): Point {
+  const total = path.total;
   const clamped = Math.min(Math.max(s, 0), total);
   // 二分查找所在采样段
   let lo = 0;
-  let hi = curve.cumulative.length - 1;
+  let hi = path.cumulative.length - 1;
   while (hi - lo > 1) {
     const mid = (lo + hi) >> 1;
-    if (curve.cumulative[mid]! <= clamped) lo = mid;
+    if (path.cumulative[mid]! <= clamped) lo = mid;
     else hi = mid;
   }
-  const s0 = curve.cumulative[lo]!;
-  const s1 = curve.cumulative[hi]!;
+  const s0 = path.cumulative[lo]!;
+  const s1 = path.cumulative[hi]!;
   const span = Math.max(s1 - s0, CUMULATIVE_EPS);
   const ratio = Math.min(Math.max((clamped - s0) / span, 0), 1);
-  const a = curve.points[lo]!;
-  const b = curve.points[hi]!;
+  const a = path.points[lo]!;
+  const b = path.points[hi]!;
   return {
     x: a.x + (b.x - a.x) * ratio,
     y: a.y + (b.y - a.y) * ratio,
@@ -141,34 +273,36 @@ export function pointAtLength(curve: EdgeCurve, s: number): Point {
 }
 
 /** 流点插值表:输入为累计弧长,输出为点坐标偏移掉半径后的画布坐标 */
-export function buildFlowInterpolation(curve: EdgeCurve, dotSize: number): FlowInterpolation {
+export function buildFlowInterpolation(path: SampledPath, dotSize: number): FlowInterpolation {
   const half = dotSize / 2;
   return {
-    inputRange: curve.cumulative,
-    outputX: curve.points.map((p) => p.x - half),
-    outputY: curve.points.map((p) => p.y - half),
+    inputRange: path.cumulative,
+    outputX: path.points.map((p) => p.x - half),
+    outputY: path.points.map((p) => p.y - half),
   };
 }
 
 /**
- * 把采样折线转成旋转矩形线段列表(圆头、端部各延长半线宽补齐接缝)。
- * 跳过长度 < 0.5 的段,避免零尺寸视图。
+ * 把采样折线转成旋转矩形线段列表。
+ * 线段宽度等于弦长(两端不延长):圆头端盖中心恰落在共享端点上,
+ * 相邻段在接缝处的并集边界等价于 SVG round join,不会在每个接缝隆起;
+ * 路径首尾由首/末段的圆头自然收口。
+ * 跳过近零长段(残差被相邻圆头完全覆盖)。
  */
-export function buildSegmentViews(curve: EdgeCurve, lineWidth: number): SegmentView[] {
+export function buildSegmentViews(path: SampledPath, lineWidth: number): SegmentView[] {
   const views: SegmentView[] = [];
-  for (let i = 1; i < curve.points.length; i++) {
-    const a = curve.points[i - 1]!;
-    const b = curve.points[i]!;
+  for (let i = 1; i < path.points.length; i++) {
+    const a = path.points[i - 1]!;
+    const b = path.points[i]!;
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const length = Math.hypot(dx, dy);
-    if (length < 0.5) continue;
-    const width = length + lineWidth; // 两端各补半线宽,圆头自然覆盖接缝
+    if (length < 0.25) continue;
     const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
     views.push({
-      left: (a.x + b.x) / 2 - width / 2,
+      left: (a.x + b.x) / 2 - length / 2,
       top: (a.y + b.y) / 2 - lineWidth / 2,
-      width,
+      width: length,
       height: lineWidth,
       rotateDeg: angle,
     });

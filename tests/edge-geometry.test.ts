@@ -123,6 +123,7 @@ test("buildSegmentViews:首尾段贴合端点,角度有限,零长段被跳过", 
   const first = views[0]!;
   const last = views[views.length - 1]!;
   // 用角度+长度重建首段弦起点/末段弦终点,应精确命中曲线两端
+  // (线段宽度=弦长,无延长;接缝由相邻圆头在共享端点处自然覆盖)
   const firstDir = {
     x: Math.cos((first.rotateDeg * Math.PI) / 180),
     y: Math.sin((first.rotateDeg * Math.PI) / 180),
@@ -132,12 +133,12 @@ test("buildSegmentViews:首尾段贴合端点,角度有限,零长段被跳过", 
     y: Math.sin((last.rotateDeg * Math.PI) / 180),
   };
   const firstStart = {
-    x: first.left + first.width / 2 - (firstDir.x * (first.width - 2)) / 2,
-    y: first.top + first.height / 2 - (firstDir.y * (first.width - 2)) / 2,
+    x: first.left + first.width / 2 - (firstDir.x * first.width) / 2,
+    y: first.top + first.height / 2 - (firstDir.y * first.width) / 2,
   };
   const lastEnd = {
-    x: last.left + last.width / 2 + (lastDir.x * (last.width - 2)) / 2,
-    y: last.top + last.height / 2 + (lastDir.y * (last.width - 2)) / 2,
+    x: last.left + last.width / 2 + (lastDir.x * last.width) / 2,
+    y: last.top + last.height / 2 + (lastDir.y * last.width) / 2,
   };
   assert.ok(Math.hypot(firstStart.x - FROM.x, firstStart.y - FROM.y) < 1e-6);
   assert.ok(Math.hypot(lastEnd.x - TO.x, lastEnd.y - TO.y) < 1e-6);

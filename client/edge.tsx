@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Animated, Easing, View } from "react-native";
 import {
-  buildEdgeCurve,
   buildFlowInterpolation,
   buildSegmentViews,
   PATH_MIN_LENGTH,
-  type Point,
+  type SampledPath,
 } from "../shared/edge-geometry";
 
 const LINE_WIDTH = 2;
@@ -14,27 +13,25 @@ const FLOW_DOT = 5;
 const FLOW_SPEED = 0.06;
 
 export interface GraphEdgeLineProps {
-  from: Point; // 父卡片底部出线点(同父多边时各自独立)
-  to: Point; // 子卡片顶部中点
+  /** 已规划路径的统一采样(直连贝塞尔或避障绕行);与 GraphEdgeFlow 消费同一对象 */
+  sampled: SampledPath;
   color: string; // 静态线颜色(运行色或主题边框色)
   dim: boolean; // 任一端已归档 → 置淡
 }
 
 export interface GraphEdgeFlowProps {
-  from: Point;
-  to: Point;
+  /** 与 GraphEdgeLine 同源采样,保证流点严格贴线 */
+  sampled: SampledPath;
   runningColor: string;
 }
 
 /**
- * 静态曲线层:三次贝塞尔采样为短线段,用 RN View + rotate + 圆头绘制平滑曲线。
- * 不运行动画;与 GraphEdgeFlow 用同一几何函数,保证流点严格落在可见线上。
+ * 静态曲线层:采样折线渲染为短线段 View + rotate,圆头端盖中心恰落在
+ * 相邻段共享端点上(等价 SVG round join),接缝无隆起、无缺口。
+ * 不运行动画;与 GraphEdgeFlow 消费同一份采样。
  */
-export function GraphEdgeLine({ from, to, color, dim }: GraphEdgeLineProps) {
-  const segments = useMemo(
-    () => buildSegmentViews(buildEdgeCurve(from, to), LINE_WIDTH),
-    [from, to],
-  );
+export function GraphEdgeLine({ sampled, color, dim }: GraphEdgeLineProps) {
+  const segments = useMemo(() => buildSegmentViews(sampled, LINE_WIDTH), [sampled]);
   return (
     <>
       {segments.map((seg, index) => (
@@ -58,31 +55,33 @@ export function GraphEdgeLine({ from, to, color, dim }: GraphEdgeLineProps) {
 }
 
 /**
- * 流点层:沿同一采样曲线做弧长线性插值,匀速从父卡片流到子卡片。
+ * 流点层:沿同一采样路径做弧长线性插值,匀速从父卡片流到子卡片。
  * 与静态线分层渲染:所有静态线先绘,所有流点后绘,避免静态线覆盖流点;
  * 本组件只在 active 时由面板挂载,自身仅跑一个流点动画。
  */
-export function GraphEdgeFlow({ from, to, runningColor }: GraphEdgeFlowProps) {
+export function GraphEdgeFlow({ sampled, runningColor }: GraphEdgeFlowProps) {
   const progress = useRef(new Animated.Value(0)).current;
 
-  const curve = useMemo(() => buildEdgeCurve(from, to), [from, to]);
-  const interpolation = useMemo(() => buildFlowInterpolation(curve, FLOW_DOT), [curve]);
+  const interpolation = useMemo(
+    () => buildFlowInterpolation(sampled, FLOW_DOT),
+    [sampled],
+  );
 
   const flowDuration = useMemo(
-    () => Math.min(2000, Math.max(900, curve.total / FLOW_SPEED)),
-    [curve],
+    () => Math.min(2000, Math.max(900, sampled.total / FLOW_SPEED)),
+    [sampled],
   );
 
   useEffect(() => {
     // 退化路径(两端重合)不启动动画
-    if (curve.total <= PATH_MIN_LENGTH || flowDuration <= 0) {
+    if (sampled.total <= PATH_MIN_LENGTH || flowDuration <= 0) {
       progress.stopAnimation();
       progress.setValue(0);
       return;
     }
     const loop = Animated.loop(
       Animated.timing(progress, {
-        toValue: curve.total,
+        toValue: sampled.total,
         duration: flowDuration,
         easing: Easing.linear,
         useNativeDriver: false,
@@ -90,10 +89,10 @@ export function GraphEdgeFlow({ from, to, runningColor }: GraphEdgeFlowProps) {
     );
     loop.start();
     return () => loop.stop();
-  }, [progress, flowDuration, curve]);
+  }, [progress, flowDuration, sampled]);
 
   // 退化路径(两端重合)不渲染流点
-  if (curve.total <= PATH_MIN_LENGTH || interpolation.inputRange.length < 2) return null;
+  if (sampled.total <= PATH_MIN_LENGTH || interpolation.inputRange.length < 2) return null;
 
   return (
     <Animated.View

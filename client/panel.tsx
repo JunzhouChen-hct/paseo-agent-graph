@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { usePaseo, useRpc, useSettings, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { Icon, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
+import { copyText, Icon, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { cancelAgentRpc, debugReportRpc } from "../shared/graph";
 import { agentGraphSettings, resolveColors, type StatusColors } from "../shared/settings";
 import {
@@ -14,7 +14,8 @@ import { useProjectAgentDirectory, type DirectoryAgent } from "./directory";
 import { computeLayout, type LayoutResult } from "./layout";
 import { AgentCard, type CardMeta } from "./card";
 import { GraphEdgeFlow, GraphEdgeLine } from "./edge";
-import { assignExitOffsets, type Point } from "../shared/edge-geometry";
+import { assignExitOffsets, type Point, type SampledPath } from "../shared/edge-geometry";
+import { planEdgePath, routeBounds, type ObstacleRect } from "../shared/edge-routing";
 import { AgentConsole } from "./console";
 import { CreateAgentPanel } from "./create-agent";
 import { TemplatesView } from "./templates";
@@ -124,7 +125,16 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
 
   // 同父多条边:子卡片按 x(再按 id)稳定排序,在父卡片底部宽度内留边距
   // 分配唯一出线点(单 child 居中),各边从底部不同位置独立发出不重叠
+  // 同父多条边:子卡片按 x(再按 id)稳定排序,在父卡片底部宽度内留边距
+  // 分配唯一出线点(单 child 居中),各边从底部不同位置独立发出不重叠。
+  // 每条边做避障规划(障碍=除两端卡片外的全部卡片),直连碰撞时绕行。
   const edges = useMemo(() => {
+    const cardH = layout.compact ? CARD_H_COMPACT : CARD_H;
+    const rects: ObstacleRect[] = [];
+    for (const agent of visible) {
+      const position = layoutResult.positions.get(agent.id);
+      if (position) rects.push({ id: agent.id, x: position.x, y: position.y, width: cardW, height: cardH });
+    }
     const byParent = new Map<string, { id: string; x: number }[]>();
     for (const agent of visible) {
       const parent = metas.get(agent.id)?.parentId;
@@ -136,26 +146,34 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       if (list) list.push({ id: agent.id, x: childPos.x });
       else byParent.set(parent, [{ id: agent.id, x: childPos.x }]);
     }
-    const list: { fromId: string; toId: string; from: Point; to: Point }[] = [];
+    const list: { fromId: string; toId: string; sampled: SampledPath }[] = [];
     for (const [parentId, children] of byParent) {
       const parentPos = layoutResult.positions.get(parentId);
       if (!parentPos) continue;
       children.sort((a, b) => a.x - b.x || a.id.localeCompare(b.id));
       const offsets = assignExitOffsets(cardW, children.length, EDGE_EXIT_MARGIN);
-      const parentBottom = parentPos.y + (layout.compact ? CARD_H_COMPACT : CARD_H);
+      const parentBottom = parentPos.y + cardH;
       children.forEach((child, index) => {
         const childPos = layoutResult.positions.get(child.id);
         if (!childPos) return;
-        list.push({
-          fromId: parentId,
-          toId: child.id,
-          from: { x: parentPos.x + (offsets[index] ?? cardW / 2), y: parentBottom },
-          to: { x: childPos.x + cardW / 2, y: childPos.y },
-        });
+        const from = { x: parentPos.x + (offsets[index] ?? cardW / 2), y: parentBottom };
+        const to = { x: childPos.x + cardW / 2, y: childPos.y };
+        // 两端卡片必须排除:端点位于卡片边界上,膨胀后必相交
+        const obstacles = rects.filter((rect) => rect.id !== parentId && rect.id !== child.id);
+        const planned = planEdgePath(from, to, obstacles);
+        list.push({ fromId: parentId, toId: child.id, sampled: planned.sampled });
       });
     }
     return list;
   }, [visible, metas, layoutResult, cardW, layout.compact]);
+
+  // 绕行路径可能越出布局包围盒:画布随之扩展,避免被 ScrollView 裁掉
+  const routeExtent = useMemo(
+    () => routeBounds(edges.map((edge) => edge.sampled)),
+    [edges],
+  );
+  const canvasWidth = Math.max(layoutResult.width, routeExtent.maxX + 4);
+  const canvasHeight = Math.max(layoutResult.height, routeExtent.maxY + 4);
 
   const stats = useMemo(() => {
     let running = 0;
@@ -244,6 +262,19 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       }
     },
     [paseo, toast],
+  );
+
+  // 右键/长按卡片复制 Agent ID:copyText 为宿主官方 API,失败明确报错
+  const handleCopyId = useCallback(
+    async (agentId: string) => {
+      try {
+        await copyText(agentId);
+        toast.show(`已复制 Agent ID:${agentId}`);
+      } catch (error) {
+        toast.error(error instanceof Error ? `复制失败:${error.message}` : "复制失败");
+      }
+    },
+    [toast],
   );
 
   const styles = useMemo(
@@ -419,7 +450,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
               style={[
                 styles.canvasInner,
                 { marginHorizontal: "auto", marginVertical: "auto" },
-                { width: Math.max(layoutResult.width, 1), height: Math.max(layoutResult.height, 1) },
+                { width: Math.max(canvasWidth, 1), height: Math.max(canvasHeight, 1) },
               ]}
             >
               <Pressable
@@ -438,8 +469,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                   return (
                     <GraphEdgeLine
                       key={`line:${edge.fromId}->${edge.toId}`}
-                      from={edge.from}
-                      to={edge.to}
+                      sampled={edge.sampled}
                       color={active ? statusColors.running : theme.colors.border}
                       dim={dim}
                     />
@@ -456,8 +486,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                   return (
                     <GraphEdgeFlow
                       key={`flow:${edge.fromId}->${edge.toId}`}
-                      from={edge.from}
-                      to={edge.to}
+                      sampled={edge.sampled}
                       runningColor={statusColors.running}
                     />
                   );
@@ -492,9 +521,11 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                       workspaceLabel={badgeFor(agent)}
                       selected={selected === agent.id}
                       canOpenAgent={Boolean(navigation)}
+                      enableLongPressCopy={layout.platform !== "web"}
                       statusColors={statusColors}
                       theme={theme}
                       onPress={() => setSelected((current) => (current === agent.id ? null : agent.id))}
+                      onCopyId={() => void handleCopyId(agent.id)}
                       onMeta={handleMeta}
                       onOpenAgent={() => openAgent(agent.id)}
                       onCreateChild={() => setSelected(`create:${agent.id}`)}
