@@ -236,6 +236,16 @@ export function AgentConsole({
   const [sending, setSending] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [pendingQueue, setPendingQueue] = useState<PendingMessage[]>([]);
+  // ref 组统一声明在任何同步读取点(useMemo/render 回调)之前,避免 TDZ ReferenceError
+  const prevStatusRef = useRef(agentLive?.status);
+  const pendingQueueRef = useRef(pendingQueue);
+  pendingQueueRef.current = pendingQueue;
+  // 本面板发送成功过的消息 id:queuedIds 排队反推只认这些,命令与外部消息不误标
+  const sentMidsRef = useRef<Set<string>>(new Set());
+  const agentIdRef = useRef(agentId);
+  agentIdRef.current = agentId;
+  const flushingForRef = useRef<string | null>(null);
+  const reflushRef = useRef(false);
   const logRef = useRef<ScrollView>(null);
 
   // 会话区高度:配置默认值即最小值,可向上拉大
@@ -455,15 +465,7 @@ export function AgentConsole({
   }, [queuedIds, pendingQueue]);
 
   // 回合结束(运行 → 非运行):先把 queue 模式攒下的未发送消息逐条补发,再刷新拉取对话
-  const prevStatusRef = useRef(agentLive?.status);
-  const pendingQueueRef = useRef(pendingQueue);
-  pendingQueueRef.current = pendingQueue;
-  // 本面板发送成功过的消息 id:queuedIds 排队反推只认这些,命令与外部消息不误标
-  const sentMidsRef = useRef<Set<string>>(new Set());
-  const agentIdRef = useRef(agentId);
-  agentIdRef.current = agentId;
-  const flushingForRef = useRef<string | null>(null);
-  const reflushRef = useRef(false);
+  // (ref 组声明统一在组件顶部,见 pendingQueue 声明处)
 
   // 面板切换 agent 不重挂载(无 key):排队消息与状态边沿必须按 agent 归属重置,
   // 否则 A 会话攒的消息会在 B 会话的回合结束边沿被误发给 B。
