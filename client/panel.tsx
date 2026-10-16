@@ -7,7 +7,8 @@ import { agentGraphSettings, resolveColors, type StatusColors } from "../shared/
 import { useAgentDirectory, type DirectoryAgent } from "./directory";
 import { computeLayout, type LayoutResult } from "./layout";
 import { AgentCard, type CardMeta } from "./card";
-import { GraphEdge } from "./edge";
+import { GraphEdgeFlow, GraphEdgeLine } from "./edge";
+import { assignExitOffsets, type Point } from "../shared/edge-geometry";
 import { AgentConsole } from "./console";
 import { CreateAgentPanel } from "./create-agent";
 import { TemplatesView } from "./templates";
@@ -18,6 +19,8 @@ const CARD_H = 92;
 const CARD_H_COMPACT = 92;
 const GAP_X = 26;
 const GAP_Y = 58;
+// 父卡片底部两侧各留的边距:多条边在该范围内分配唯一出线点
+const EDGE_EXIT_MARGIN = 24;
 
 export function GraphPanel({ theme, layout, workspaceId, navigation, host }: PluginWorkspacePanelProps) {
   const paseo = usePaseo();
@@ -97,16 +100,42 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     [metas],
   );
 
+  const agentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
+
+  // 同父多条边:子卡片按 x(再按 id)稳定排序,在父卡片底部宽度内留边距
+  // 分配唯一出线点(单 child 居中),各边从底部不同位置独立发出不重叠
   const edges = useMemo(() => {
-    const list: { fromId: string; toId: string }[] = [];
+    const byParent = new Map<string, { id: string; x: number }[]>();
     for (const agent of visible) {
       const parent = metas.get(agent.id)?.parentId;
-      if (parent && layoutResult.positions.has(parent) && layoutResult.positions.has(agent.id)) {
-        list.push({ fromId: parent, toId: agent.id });
-      }
+      if (!parent) continue;
+      const parentPos = layoutResult.positions.get(parent);
+      const childPos = layoutResult.positions.get(agent.id);
+      if (!parentPos || !childPos) continue;
+      const list = byParent.get(parent);
+      if (list) list.push({ id: agent.id, x: childPos.x });
+      else byParent.set(parent, [{ id: agent.id, x: childPos.x }]);
+    }
+    const list: { fromId: string; toId: string; from: Point; to: Point }[] = [];
+    for (const [parentId, children] of byParent) {
+      const parentPos = layoutResult.positions.get(parentId);
+      if (!parentPos) continue;
+      children.sort((a, b) => a.x - b.x || a.id.localeCompare(b.id));
+      const offsets = assignExitOffsets(cardW, children.length, EDGE_EXIT_MARGIN);
+      const parentBottom = parentPos.y + (layout.compact ? CARD_H_COMPACT : CARD_H);
+      children.forEach((child, index) => {
+        const childPos = layoutResult.positions.get(child.id);
+        if (!childPos) return;
+        list.push({
+          fromId: parentId,
+          toId: child.id,
+          from: { x: parentPos.x + (offsets[index] ?? cardW / 2), y: parentBottom },
+          to: { x: childPos.x + cardW / 2, y: childPos.y },
+        });
+      });
     }
     return list;
-  }, [visible, metas, layoutResult]);
+  }, [visible, metas, layoutResult, cardW, layout.compact]);
 
   const stats = useMemo(() => {
     let running = 0;
@@ -339,29 +368,41 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                 accessibilityLabel="取消选中"
               />
               <View style={styles.edgeLayer} pointerEvents="none">
-              {edges.map((edge) => {
-                const from = layoutResult.positions.get(edge.fromId);
-                const to = layoutResult.positions.get(edge.toId);
-                if (!from || !to) return null;
-                const fromAgent = agents.find((a) => a.id === edge.fromId);
-                const toAgent = agents.find((a) => a.id === edge.toId);
-                if (!fromAgent || !toAgent) return null;
-                const active =
-                  statusOf(fromAgent) === "running" && statusOf(toAgent) === "running";
-                const dim = fromAgent.archived || toAgent.archived;
-                return (
-                  <GraphEdge
-                    key={`${edge.fromId}->${edge.toId}`}
-                    from={{ x: from.x + cardW / 2, y: from.y + (layout.compact ? CARD_H_COMPACT : CARD_H) }}
-                    to={{ x: to.x + cardW / 2, y: to.y }}
-                    active={active}
-                    dim={dim}
-                    runningColor={statusColors.running}
-                    theme={theme}
-                  />
-                );
-              })}
-            </View>
+                {edges.map((edge) => {
+                  const fromAgent = agentById.get(edge.fromId);
+                  const toAgent = agentById.get(edge.toId);
+                  if (!fromAgent || !toAgent) return null;
+                  const active =
+                    statusOf(fromAgent) === "running" && statusOf(toAgent) === "running";
+                  const dim = fromAgent.archived || toAgent.archived;
+                  return (
+                    <GraphEdgeLine
+                      key={`line:${edge.fromId}->${edge.toId}`}
+                      from={edge.from}
+                      to={edge.to}
+                      color={active ? statusColors.running : theme.colors.border}
+                      dim={dim}
+                    />
+                  );
+                })}
+                {/* 第二遍:流点后绘,避免被其他静态线覆盖 */}
+                {edges.map((edge) => {
+                  const fromAgent = agentById.get(edge.fromId);
+                  const toAgent = agentById.get(edge.toId);
+                  if (!fromAgent || !toAgent) return null;
+                  if (statusOf(fromAgent) !== "running" || statusOf(toAgent) !== "running") {
+                    return null;
+                  }
+                  return (
+                    <GraphEdgeFlow
+                      key={`flow:${edge.fromId}->${edge.toId}`}
+                      from={edge.from}
+                      to={edge.to}
+                      runningColor={statusColors.running}
+                    />
+                  );
+                })}
+              </View>
             <View style={styles.cardLayer} pointerEvents="box-none">
               {visible.map((agent) => {
                 const position = layoutResult.positions.get(agent.id);

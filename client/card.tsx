@@ -112,7 +112,7 @@ export const AgentCard = memo(function AgentCard({
     attentionReason: meta.attentionReason,
   });
   const toneHex = toneColor(tone, theme, statusColors);
-  // 运行/待处理/出错三种状态显示状态色边框并呼吸;done/muted 静默,归档走 muted 无动效
+  // 运行/待处理/出错三种状态呼吸;done/muted 静默,归档走 muted 无动效
   const animated = tone === "running" || tone === "attention" || tone === "failed";
 
   const pulse = useRef(new Animated.Value(0)).current;
@@ -149,18 +149,20 @@ export const AgentCard = memo(function AgentCard({
           flex: 1,
           borderRadius: 12,
           borderWidth: selected ? 2 : 1,
+          // 呼吸时本体边框透明:可见边框只有呼吸 ring 一条,选中/运行态都不再叠固定框
           borderColor: animated
-            ? toneHex
+            ? "transparent"
             : selected
               ? theme.colors.accent
               : theme.colors.border,
           backgroundColor: theme.colors.surface1,
           overflow: "hidden",
         },
+        // 唯一的呼吸边框:宽度与本体边框一致,半径按边框宽度内缩保持同心
         pulseRing: {
           ...StyleSheet.absoluteFillObject,
-          borderRadius: 12,
-          borderWidth: 2,
+          borderRadius: selected ? 10 : 11,
+          borderWidth: selected ? 2 : 1,
           borderColor: toneHex,
         },
         body: {
@@ -216,7 +218,7 @@ export const AgentCard = memo(function AgentCard({
       {animated && !archived ? (
         <Animated.View
           pointerEvents="none"
-          style={[styles.pulseRing, { opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.12, 0.75] }) }]}
+          style={[styles.pulseRing, { opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1] }) }]}
         />
       ) : null}
       <View style={styles.body}>
