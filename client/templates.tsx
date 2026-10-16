@@ -4,6 +4,11 @@ import { usePaseo, useRpc, useSettings, useWorkspace } from "@getpaseo/plugin/cl
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import {
+  pickSpeedFeature,
+  speedSelectionValid,
+  type SpeedFeatureDescriptor,
+} from "../shared/provider-speed";
+import {
   TEMPLATE_MAX_NODES,
   matchProjectDefault,
   newTemplateId,
@@ -209,22 +214,31 @@ function cloneDoc(doc: TemplatesBaseDoc): TemplatesBaseDoc {
 }
 
 /**
- * 节点配置选择区:提供方/模型/思考强度,选项全部来自真实 providers.listAvailable/listModels。
+ * 节点配置选择区:提供方/模型/思考强度/权限模式/速度,选项全部来自真实
+ * providers.listAvailable/listModels/listModes/listFeatures。
  * 不做任何自动替换:目录失效时原值保留并显示失效警告,只有用户显式选择才重置相关值;
- * null 思考强度始终表示"默认"。切换提供方/模型属于用户显式操作,会重置下游选择。
+ * null 思考强度与空 modeId/速度都表示"默认"(创建时不传)。切换提供方/模型属于用户显式操作,
+ * 会清除下游 mode/速度选择。速度仅在真实 descriptor 存在时显示(未知/不支持隐藏)。
  */
 function NodeConfigPickers({
   node,
+  workspaceId,
   onPatch,
   theme,
 }: {
   node: TemplateNodeConfig;
+  workspaceId: string;
   onPatch(patch: Partial<TemplateNodeConfig>): void;
   theme: PluginTheme;
 }) {
   const paseo = usePaseo();
+  // workspace 目录是 listFeatures 必填项;缺失时隐藏速度行
+  const cwd = useWorkspace(workspaceId, (workspace) => workspace.directory);
   const [providers, setProviders] = useState<PickerRow[] | null>(null);
   const [models, setModels] = useState<ModelOption[] | null>(null);
+  const [modes, setModes] = useState<PickerRow[] | null>(null);
+  // 速度:undefined 目录加载中,null 当前组合不支持(隐藏),否则 descriptor
+  const [speed, setSpeed] = useState<SpeedFeatureDescriptor | null | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -268,6 +282,54 @@ function NodeConfigPickers({
     };
   }, [paseo, node.provider]);
 
+  // 提供方变化 → 拉真实模式目录(listModes);仅加载,不改动 node
+  useEffect(() => {
+    let cancelled = false;
+    setModes(null);
+    if (!node.provider) {
+      setModes([]);
+      return;
+    }
+    paseo.providers
+      .listModes(node.provider)
+      .then((result) => {
+        if (cancelled) return;
+        setModes((result.modes ?? []).map((mode) => ({ id: mode.id, label: mode.label || mode.id })));
+      })
+      .catch(() => {
+        if (!cancelled) setModes([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [paseo, node.provider]);
+
+  // provider/model/mode 确定后 → 拉真实特性目录,只保留速度 descriptor;缺失/失败按不支持隐藏
+  useEffect(() => {
+    let cancelled = false;
+    setSpeed(undefined);
+    if (!node.provider || !node.model || !cwd) {
+      setSpeed(null);
+      return;
+    }
+    paseo.providers
+      .listFeatures({
+        provider: `${node.provider}/${node.model}`,
+        cwd,
+        ...(node.modeId ? { modeId: node.modeId } : {}),
+      })
+      .then((result) => {
+        if (cancelled) return;
+        setSpeed(pickSpeedFeature(result.features ?? []));
+      })
+      .catch(() => {
+        if (!cancelled) setSpeed(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [paseo, node.provider, node.model, node.modeId, cwd]);
+
   const currentModel = useMemo(
     () => models?.find((model) => model.id === node.model) ?? null,
     [models, node.model],
@@ -281,6 +343,26 @@ function NodeConfigPickers({
     return rows;
   }, [thinkingOptions]);
 
+  // 节点已保存的速度选择 → UI 选择串(仅 descriptor 确认为同一 id 时可展示)
+  const speedCurrentSelection = useMemo<string>(() => {
+    if (!node.speedFeatureId || !speed || speed.id !== node.speedFeatureId) return "";
+    if (speed.type === "toggle") return node.speedFeatureValue === true ? "on" : "";
+    return typeof node.speedFeatureValue === "string" ? node.speedFeatureValue : "";
+  }, [node.speedFeatureId, node.speedFeatureValue, speed]);
+
+  const speedRows = useMemo<PickerRow[] | null>(() => {
+    if (!speed) return null;
+    return speed.type === "toggle"
+      ? [
+          { id: "", label: "默认(不指定)" },
+          { id: "on", label: "开启" },
+        ]
+      : [
+          { id: "", label: "默认(不指定)" },
+          ...(speed.options ?? []).map((option) => ({ id: option.id, label: option.label })),
+        ];
+  }, [speed]);
+
   // 失效警告:目录就绪后原值不在目录 → 原样展示 + 红色提示,不做替换
   const providerInvalid = Boolean(providers && node.provider && !providers.some((row) => row.id === node.provider));
   const modelInvalid = Boolean(
@@ -289,6 +371,14 @@ function NodeConfigPickers({
   const thinkingInvalid = Boolean(
     node.thinkingOptionId &&
       (thinkingOptions === null || thinkingOptions.length === 0 || !thinkingOptions.some((option) => option.id === node.thinkingOptionId)),
+  );
+  const modeInvalid = Boolean(
+    node.modeId && modes && modes.length > 0 && !modes.some((mode) => mode.id === node.modeId),
+  );
+  // 速度失效:descriptor 未确认到相同 id,或已选值不再受支持
+  const speedInvalid = Boolean(
+    node.speedFeatureId &&
+      (!speed || speed.id !== node.speedFeatureId || !speedSelectionValid(speed, speedCurrentSelection)),
   );
 
   const styles = useMemo(
@@ -309,8 +399,14 @@ function NodeConfigPickers({
         theme={theme}
         onPick={(id) => {
           if (id === node.provider) return;
-          // 用户显式切换:重置模型/思考强度,清除采集来的 modeId
-          onPatch({ provider: id, model: "", thinkingOptionId: null, ...(node.modeId ? { modeId: undefined } : {}) });
+          // 用户显式切换:重置模型/思考强度,清除采集来的 modeId 与速度配置
+          onPatch({
+            provider: id,
+            model: "",
+            thinkingOptionId: null,
+            ...(node.modeId ? { modeId: undefined } : {}),
+            ...(node.speedFeatureId ? { speedFeatureId: undefined, speedFeatureValue: undefined } : {}),
+          });
         }}
       />
       {providerInvalid ? <Text style={styles.warn}>提供方 {node.provider} 不在当前目录,原值保留;创建时会真实预检</Text> : null}
@@ -322,9 +418,29 @@ function NodeConfigPickers({
           node.model && (models === null || modelInvalid) ? { label: node.model, invalid: modelInvalid } : null
         }
         theme={theme}
-        onPick={(id) => onPatch({ model: id, thinkingOptionId: null })}
+        onPick={(id) =>
+          onPatch({
+            model: id,
+            thinkingOptionId: null,
+            // 速度依赖具体 model:显式切模型清除速度配置,mode 保留(仍属同一提供方)
+            ...(node.speedFeatureId ? { speedFeatureId: undefined, speedFeatureValue: undefined } : {}),
+          })
+        }
       />
       {modelInvalid ? <Text style={styles.warn}>模型 {node.model} 不在当前目录,原值保留;创建时会真实预检</Text> : null}
+      <PickerField
+        label="权限模式"
+        rows={modes && modes.length > 0 ? [{ id: "", label: "默认(不指定)" }, ...modes] : modes}
+        currentId={node.modeId ?? ""}
+        valueOverride={modeInvalid ? { label: `${node.modeId}(原值保留)`, invalid: true } : null}
+        theme={theme}
+        onPick={(id) => onPatch({ ...(id ? { modeId: id } : { modeId: undefined }) })}
+      />
+      {modeInvalid ? (
+        <Text style={styles.warn}>
+          权限模式 {node.modeId} 未能从当前目录确认(提供方无该模式或目录未确认),原值保留;创建时会真实预检
+        </Text>
+      ) : null}
       <PickerField
         label="思考强度"
         rows={thinkingRows}
@@ -342,9 +458,36 @@ function NodeConfigPickers({
           思考强度 {node.thinkingOptionId} 未能从当前目录确认(模型无该选项或模型未确认),原值保留;创建时会真实预检
         </Text>
       ) : null}
-      {node.modeId ? (
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-          采集的模式:{node.modeId}(切换提供方后清除)
+      {speed ? (
+        <PickerField
+          label={speed.label || "速度"}
+          rows={speedRows}
+          currentId={speedCurrentSelection}
+          valueOverride={
+            node.speedFeatureId && speedInvalid
+              ? {
+                  label: `${node.speedFeatureId}=${String(node.speedFeatureValue)}(原值保留)`,
+                  invalid: true,
+                }
+              : null
+          }
+          theme={theme}
+          onPick={(id) =>
+            // ""=不指定;toggle "on"=true;select 为 option id
+            onPatch(
+              id
+                ? {
+                    speedFeatureId: speed.id,
+                    speedFeatureValue: speed.type === "toggle" ? true : id,
+                  }
+                : { speedFeatureId: undefined, speedFeatureValue: undefined },
+            )
+          }
+        />
+      ) : null}
+      {node.speedFeatureId && speedInvalid ? (
+        <Text style={styles.warn}>
+          速度 {node.speedFeatureId}={String(node.speedFeatureValue)} 未能从当前目录确认(该组合不支持或目录未确认),原值保留;创建时会真实预检
         </Text>
       ) : null}
     </View>
@@ -354,12 +497,15 @@ function NodeConfigPickers({
 /** 模板编辑器:节点增删/父子调整/配置选择;保存固定 base revision,冲突后显式"载入最新并保留草稿" */
 function TemplateEditor({
   editor,
+  workspaceId,
   theme,
   compact,
   onSaved,
   onCancel,
 }: {
   editor: EditorState;
+  /** 当前 workspace id,供节点配置区拉取 features(listFeatures 需要 cwd) */
+  workspaceId: string;
   theme: PluginTheme;
   compact: boolean;
   onSaved(): void;
@@ -389,6 +535,9 @@ function TemplateEditor({
           provider: root?.provider ?? "",
           model: root?.model ?? "",
           thinkingOptionId: root?.thinkingOptionId ?? null,
+          ...(root?.modeId ? { modeId: root.modeId } : {}),
+          ...(root?.speedFeatureId !== undefined ? { speedFeatureId: root.speedFeatureId } : {}),
+          ...(root?.speedFeatureValue !== undefined ? { speedFeatureValue: root.speedFeatureValue } : {}),
         },
       ];
     });
@@ -649,7 +798,12 @@ function TemplateEditor({
                   onPick={(id) => patchNode(node.key, { parentKey: id || null })}
                 />
               )}
-              <NodeConfigPickers node={node} onPatch={(patch) => patchNode(node.key, patch)} theme={theme} />
+              <NodeConfigPickers
+                node={node}
+                workspaceId={workspaceId}
+                onPatch={(patch) => patchNode(node.key, patch)}
+                theme={theme}
+              />
             </View>
           );
         })}
@@ -924,7 +1078,7 @@ function TaskLauncher({
           />
         </View>
         <Text style={styles.hint}>
-          按模板在当前 workspace 创建整棵 agent 树;所有节点的提供方/模型/思考强度会先做真实预检,不支持时明确报错,不会替换配置。
+          按模板在当前 workspace 创建整棵 agent 树;所有节点的提供方/模型/思考强度/权限模式/速度会先做真实预检,不支持时明确报错,不会替换配置。
         </Text>
 
         {running ? <Text style={styles.hint}>创建进行中,输入与导航已锁定;请勿关闭面板</Text> : null}
@@ -1197,6 +1351,7 @@ export function TemplatesView({
     return (
       <TemplateEditor
         editor={editor}
+        workspaceId={workspaceId}
         theme={theme}
         compact={compact}
         onSaved={() => {

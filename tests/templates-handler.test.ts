@@ -15,6 +15,10 @@ function makePaseo(opts: {
   available?: { provider: string; available: boolean; error?: string | null }[];
   models?: Record<string, Record<string, unknown>[]>;
   modes?: Record<string, { id: string }[]>;
+  /** listFeatures 返回目录,key 为 "provider/model" 组合串 */
+  features?: Record<string, unknown[]>;
+  /** 设置后 listFeatures 抛错,消息即该值 */
+  failFeatures?: string;
   /** 返回错误消息则该次 create 抛错 */
   failCreateAt?: (input: Record<string, unknown>, index: number) => string | null;
 }) {
@@ -57,6 +61,10 @@ function makePaseo(opts: {
       },
       listModels: async (provider: string) => ({ models: opts.models?.[provider] ?? [] }),
       listModes: async (provider: string) => ({ modes: opts.modes?.[provider] ?? [] }),
+      listFeatures: async (draft: { provider: string; cwd: string }) => {
+        if (opts.failFeatures) throw new Error(opts.failFeatures);
+        return { features: opts.features?.[draft.provider] ?? [] };
+      },
     },
   };
   return {
@@ -357,4 +365,205 @@ test("prevalidateConfigs:modeId 不在目录 → 拒绝;目录缺该 provider �
     [node({ key: "n1", provider: "ghost-provider" })],
   );
   assert.ok(errors2.some((e) => e.includes("ghost-provider")));
+});
+
+/** Codex 真实速度 descriptor(select service_tier) */
+const SPEED_FEATURE = {
+  type: "select",
+  id: "service_tier",
+  label: "Speed",
+  value: "default",
+  options: [
+    { id: "default", label: "Normal", isDefault: true },
+    { id: "priority", label: "Fast" },
+  ],
+};
+
+const SPEED_WORKSPACE = { id: "ws1", title: "WS", workspaceDirectory: "/repo" };
+
+test("handler 建树:有效速度 select → config.featureValues 传入(不是 features 键)", async () => {
+  const mock = makePaseo({
+    workspace: SPEED_WORKSPACE,
+    ...OK_PROBE,
+    features: { "codex/gpt-5.5": [SPEED_FEATURE] },
+  });
+  const result = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "",
+      runId: "r1",
+      nodes: [node({ key: "root", speedFeatureId: "service_tier", speedFeatureValue: "priority" })],
+    } as never,
+    mock,
+  );
+  assert.equal(result.ok, true);
+  const config = mock.createCalls[0].config as Record<string, unknown>;
+  assert.deepEqual(config.featureValues, { service_tier: "priority" });
+  assert.equal(config.modeId, undefined);
+});
+
+test("handler 建树:有效 modeId → config.modeId 传入;速度 toggle → featureValues 布尔", async () => {
+  const mock = makePaseo({
+    workspace: SPEED_WORKSPACE,
+    available: [{ provider: "codex", available: true }],
+    models: { codex: [{ id: "gpt-5.5" }] },
+    modes: { codex: [{ id: "acceptEdits" }, { id: "bypassPermissions" }] },
+    features: { "codex/gpt-5.5": [{ type: "toggle", id: "priority_speed", label: "Speed", value: false }] },
+  });
+  const result = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "",
+      runId: "r1",
+      nodes: [
+        node({ key: "root", modeId: "acceptEdits", speedFeatureId: "priority_speed", speedFeatureValue: true }),
+      ],
+    } as never,
+    mock,
+  );
+  assert.equal(result.ok, true);
+  const config = mock.createCalls[0].config as Record<string, unknown>;
+  assert.equal(config.modeId, "acceptEdits");
+  assert.deepEqual(config.featureValues, { priority_speed: true });
+});
+
+test("handler 建树:速度选项非法/目录为空/拉取失败/缺 cwd → 均拒绝且零创建", async () => {
+  const base = {
+    workspace: SPEED_WORKSPACE,
+    ...OK_PROBE,
+  };
+  // 选项不在 descriptor 内
+  const badOption = makePaseo({
+    ...base,
+    features: { "codex/gpt-5.5": [SPEED_FEATURE] },
+  });
+  const r1 = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "",
+      runId: "r1",
+      nodes: [node({ key: "root", speedFeatureId: "service_tier", speedFeatureValue: "turbo" })],
+    } as never,
+    badOption,
+  );
+  assert.equal(r1.ok, false);
+  assert.equal(badOption.createCalls.length, 0);
+  assert.ok(r1.validationErrors.some((e) => e.includes("turbo")));
+
+  // 提供方目录为空(无速度特性)→ 显式速度拒绝
+  const noSpeed = makePaseo({ ...base, features: { "codex/gpt-5.5": [] } });
+  const r2 = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "",
+      runId: "r1",
+      nodes: [node({ key: "root", speedFeatureId: "service_tier", speedFeatureValue: "priority" })],
+    } as never,
+    noSpeed,
+  );
+  assert.equal(r2.ok, false);
+  assert.equal(noSpeed.createCalls.length, 0);
+  assert.ok(r2.validationErrors.some((e) => e.includes("未提供速度特性")));
+
+  // 目录拉取失败 → 拒绝
+  const failed = makePaseo({ ...base, failFeatures: "boom" });
+  const r3 = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "",
+      runId: "r1",
+      nodes: [node({ key: "root", speedFeatureId: "service_tier", speedFeatureValue: "priority" })],
+    } as never,
+    failed,
+  );
+  assert.equal(r3.ok, false);
+  assert.equal(failed.createCalls.length, 0);
+  assert.ok(r3.validationErrors.some((e) => e.includes("速度特性目录拉取失败")));
+
+  // workspace 缺目录信息 → 无法确认,拒绝
+  const noCwd = makePaseo({
+    workspace: { id: "ws1", title: "WS" },
+    ...OK_PROBE,
+    features: { "codex/gpt-5.5": [SPEED_FEATURE] },
+  });
+  const r4 = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "",
+      runId: "r1",
+      nodes: [node({ key: "root", speedFeatureId: "service_tier", speedFeatureValue: "priority" })],
+    } as never,
+    noCwd,
+  );
+  assert.equal(r4.ok, false);
+  assert.equal(noCwd.createCalls.length, 0);
+  assert.ok(r4.validationErrors.some((e) => e.includes("缺少目录信息")));
+
+  // 无速度配置的节点不受影响(缺 cwd 也能创建)
+  const plain = makePaseo({ workspace: { id: "ws1", title: "WS" }, ...OK_PROBE });
+  const r5 = await handleCreateTaskFromTemplate(
+    { workspaceId: "ws1", title: "任务", prompt: "", runId: "r1", nodes: [node({ key: "root" })] } as never,
+    plain,
+  );
+  assert.equal(r5.ok, true);
+});
+
+test("handler 建树:成对校验(速度缺取值)→ 树校验拒绝", async () => {
+  const mock = makePaseo({
+    workspace: SPEED_WORKSPACE,
+    ...OK_PROBE,
+    features: { "codex/gpt-5.5": [SPEED_FEATURE] },
+  });
+  const result = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "",
+      runId: "r1",
+      nodes: [node({ key: "root", speedFeatureId: "service_tier" })],
+    } as never,
+    mock,
+  );
+  assert.equal(result.ok, false);
+  assert.equal(mock.createCalls.length, 0);
+  assert.ok(result.validationErrors.some((e) => e.includes("缺少取值")));
+});
+
+test("handler 导入:快照 features 采集速度节点字段", async () => {
+  const mock = makePaseo({
+    workspace: { id: "ws1", title: "WS" },
+    directory: [{ agent: { id: "a1", workspaceId: "ws1", archivedAt: null, createdAt: "1", labels: {} } }],
+    snapshots: {
+      a1: {
+        id: "a1",
+        title: "带速度",
+        provider: "codex",
+        model: "gpt-6.1-sol",
+        thinkingOptionId: null,
+        currentModeId: null,
+        features: [
+          {
+            type: "select",
+            id: "service_tier",
+            label: "Speed",
+            value: "priority",
+            options: [{ id: "default", label: "Normal" }, { id: "priority", label: "Fast" }],
+          },
+        ],
+        archivedAt: null,
+        createdAt: "1",
+        labels: {},
+      },
+    },
+  });
+  const result = await handleImportTemplate({ workspaceId: "ws1" }, mock);
+  assert.equal(result.nodes.length, 1);
+  assert.equal(result.nodes[0].speedFeatureId, "service_tier");
+  assert.equal(result.nodes[0].speedFeatureValue, "priority");
 });

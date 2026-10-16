@@ -105,6 +105,46 @@ test("settings schema:非法树(环)被拒绝", () => {
   assert.ok(!parsed.success);
 });
 
+test("settings schema:旧文档(无 modeId 之外的采集字段)解析不受新字段影响", () => {
+  // 旧版本落盘的节点只有基础字段;新字段全部 optional,必须原样解析通过
+  const parsed = agentGraphTemplatesSettings.schema.safeParse({
+    templates: [
+      { id: "t1", name: "旧模板", nodes: [{ key: "n1", parentKey: null, title: "", provider: "codex", model: "gpt-5.5", thinkingOptionId: null }] },
+    ],
+    defaults: {},
+  });
+  assert.ok(parsed.success);
+  if (parsed.success) {
+    const old = parsed.data.templates[0].nodes[0];
+    assert.equal(old.modeId, undefined);
+    assert.equal(old.speedFeatureId, undefined);
+    assert.equal(old.speedFeatureValue, undefined);
+  }
+});
+
+test("settings schema:新速度字段成对写入可通过,半配置被拒绝", () => {
+  const good = agentGraphTemplatesSettings.schema.safeParse({
+    templates: [
+      {
+        id: "t1",
+        name: "新模板",
+        nodes: [node({ key: "n1", modeId: "acceptEdits", speedFeatureId: "service_tier", speedFeatureValue: "priority" })],
+      },
+    ],
+  });
+  assert.ok(good.success);
+  // 缺取值 → superRefine 拒绝
+  const half = agentGraphTemplatesSettings.schema.safeParse({
+    templates: [{ id: "t1", name: "新模板", nodes: [node({ key: "n1", speedFeatureId: "service_tier" })] }],
+  });
+  assert.ok(!half.success);
+  // 缺 id → 拒绝
+  const orphan = agentGraphTemplatesSettings.schema.safeParse({
+    templates: [{ id: "t1", name: "新模板", nodes: [node({ key: "n1", speedFeatureValue: true })] }],
+  });
+  assert.ok(!orphan.success);
+});
+
 test("mergeDraftIntoDoc:以最新文档为底,草稿覆盖同 id,defaults 取最新", () => {
   const latest = doc(
     [

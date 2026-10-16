@@ -1,8 +1,14 @@
 import { z } from "zod";
+import {
+  explicitSpeedSelection,
+  pickSpeedFeature,
+  type RawFeatureDescriptor,
+} from "./provider-speed";
 
 /**
  * 节点模板的纯数据模型:Zod 契约、树校验、导入归一化、拓扑排序、默认模板匹配。
- * 本模块只依赖 zod,不 import @getpaseo/plugin / node / react,便于单元测试与双端复用。
+ * 本模块只依赖 zod 与 provider-speed 纯逻辑,不 import @getpaseo/plugin / node / react,
+ * 便于单元测试与双端复用。
  */
 
 /** 单个模板节点的配置;key 是模板内唯一标识,parentKey 为 null 表示主节点(根)。 */
@@ -17,6 +23,10 @@ export const templateNodeSchema = z.object({
   thinkingOptionId: z.string().nullable(),
   /** 仅在"从当前节点生成"采集原 agent 时保留;编辑器切换 provider 时清除 */
   modeId: z.string().optional(),
+  /** 速度 feature id(如 codex 的 service_tier);未采集/未选择时不设,旧 settings 文档天然兼容 */
+  speedFeatureId: z.string().optional(),
+  /** 速度选择值:select 为 option id,toggle 为 true;与 speedFeatureId 成对出现 */
+  speedFeatureValue: z.union([z.string(), z.boolean()]).optional(),
 });
 
 export type TemplateNodeConfig = z.output<typeof templateNodeSchema>;
@@ -44,6 +54,13 @@ export function validateTemplateNodes(nodes: readonly TemplateNodeConfig[]): {
     }
     if (seen.has(node.key)) errors.push(`节点 key 重复:${node.key}`);
     seen.add(node.key);
+    // 速度配置必须成对出现:id 与取值缺一不可,避免半配置状态流入创建
+    if (node.speedFeatureId && node.speedFeatureValue === undefined) {
+      errors.push(`节点 ${node.key} 配置了速度 ${node.speedFeatureId} 但缺少取值`);
+    }
+    if (!node.speedFeatureId && node.speedFeatureValue !== undefined) {
+      errors.push(`节点 ${node.key} 配置了速度取值但缺少速度 feature id`);
+    }
   }
   for (const node of nodes) {
     if (!node.parentKey) continue;
@@ -190,6 +207,8 @@ export interface ImportableAgentSnapshot {
   model: string | null;
   thinkingOptionId: string | null;
   modeId: string | null;
+  /** agent 快照自带 features descriptor 列表(与 listFeatures 同构),用于采集速度 */
+  features?: RawFeatureDescriptor[];
   archivedAt: string | null;
   createdAt: string;
   labels: Readonly<Record<string, string>>;
@@ -252,16 +271,26 @@ export function buildTemplateFromSnapshots(
   const agentIdToKey = new Map<string, string>();
   kept.forEach((snap, index) => agentIdToKey.set(snap.id, `n${index + 1}`));
 
+  /** 从快照 features 采集显式速度选择(等效默认/不支持的都不存,保持模板精简) */
+  const speedFromSnapshot = (snap: ImportableAgentSnapshot) => {
+    const feature = pickSpeedFeature(snap.features);
+    return feature ? explicitSpeedSelection(feature) : null;
+  };
+
   const buildNodes = (source: readonly ImportableAgentSnapshot[]): TemplateNodeConfig[] =>
-    source.map((snap) => ({
-      key: agentIdToKey.get(snap.id) as string,
-      parentKey: parentByKey.get(snap.id) ? (agentIdToKey.get(parentByKey.get(snap.id) as string) ?? null) : null,
-      title: snap.title ?? "",
-      provider: snap.provider,
-      model: snap.model ?? "",
-      thinkingOptionId: snap.thinkingOptionId,
-      ...(snap.modeId ? { modeId: snap.modeId } : {}),
-    }));
+    source.map((snap) => {
+      const speed = speedFromSnapshot(snap);
+      return {
+        key: agentIdToKey.get(snap.id) as string,
+        parentKey: parentByKey.get(snap.id) ? (agentIdToKey.get(parentByKey.get(snap.id) as string) ?? null) : null,
+        title: snap.title ?? "",
+        provider: snap.provider,
+        model: snap.model ?? "",
+        thinkingOptionId: snap.thinkingOptionId,
+        ...(snap.modeId ? { modeId: snap.modeId } : {}),
+        ...(speed ? { speedFeatureId: speed.id, speedFeatureValue: speed.value } : {}),
+      };
+    });
 
   // 预留虚拟主节点的位置:多根时最终节点数 = 保留数 + 1,超出上限就继续收缩
   let keptCurrent = kept;
@@ -293,6 +322,8 @@ export function buildTemplateFromSnapshots(
       model: seed.model,
       thinkingOptionId: seed.thinkingOptionId,
       ...(seed.modeId ? { modeId: seed.modeId } : {}),
+      ...(seed.speedFeatureId !== undefined ? { speedFeatureId: seed.speedFeatureId } : {}),
+      ...(seed.speedFeatureValue !== undefined ? { speedFeatureValue: seed.speedFeatureValue } : {}),
     };
     nodes.forEach((node) => {
       if (!node.parentKey) node.parentKey = virtualNode.key;

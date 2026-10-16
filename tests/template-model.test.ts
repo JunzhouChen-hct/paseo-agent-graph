@@ -59,6 +59,14 @@ test("树校验:重复 key / 缺失父引用 / 多根 / key 格式", () => {
   assert.ok(!validateTemplateNodes([node({ key: "bad key" })]).ok);
 });
 
+test("树校验:速度配置必须成对出现", () => {
+  assert.ok(validateTemplateNodes([node({ key: "n1", speedFeatureId: "service_tier", speedFeatureValue: "priority" })]).ok);
+  const missingValue = validateTemplateNodes([node({ key: "n1", speedFeatureId: "service_tier" })]);
+  assert.ok(missingValue.errors.some((e) => e.includes("缺少取值")));
+  const missingId = validateTemplateNodes([node({ key: "n1", speedFeatureValue: "priority" })]);
+  assert.ok(missingId.errors.some((e) => e.includes("缺少速度 feature id")));
+});
+
 test("树校验:环检测", () => {
   const cycle = validateTemplateNodes([
     node({ key: "n1", parentKey: "n2" }),
@@ -223,6 +231,65 @@ test("导入:超过上限截断并给出提示", () => {
   const result = buildTemplateFromSnapshots(snaps, { suggestedName: "草稿" });
   assert.ok(result.nodes.length <= TEMPLATE_MAX_NODES);
   assert.ok(result.notes.some((note) => note.includes("截断")));
+});
+
+test("导入:从快照 features 采集显式速度,默认/不支持不采集", () => {
+  const speedSelect = {
+    type: "select",
+    id: "service_tier",
+    label: "Speed",
+    options: [{ id: "default", label: "Normal" }, { id: "priority", label: "Fast" }],
+  };
+  const result = buildTemplateFromSnapshots(
+    [
+      // 显式 priority → 采集
+      snap({ id: "a", createdAt: "1", features: [{ ...speedSelect, value: "priority" }] }),
+      // value null(未选择)→ 不采集
+      snap({ id: "b", createdAt: "2", features: [{ ...speedSelect, value: null }] }),
+      // 无 features / 只有权限类 descriptor → 不采集
+      snap({ id: "c", createdAt: "3", features: [{ type: "toggle", id: "auto_accept", label: "Auto accept", value: true }] }),
+      snap({ id: "d", createdAt: "4" }),
+    ],
+    { suggestedName: "草稿" },
+  );
+  const a = result.nodes.find((n) => n.title === "a");
+  assert.deepEqual(
+    { id: a?.speedFeatureId, value: a?.speedFeatureValue },
+    { id: "service_tier", value: "priority" },
+  );
+  for (const key of ["b", "c", "d"]) {
+    const target = result.nodes.find((n) => n.title === key);
+    assert.equal(target?.speedFeatureId, undefined);
+    assert.equal(target?.speedFeatureValue, undefined);
+  }
+});
+
+test("导入:虚拟主节点继承第一个根的速度与模式配置", () => {
+  const result = buildTemplateFromSnapshots(
+    [
+      snap({
+        id: "r1",
+        createdAt: "1",
+        modeId: "acceptEdits",
+        features: [
+          {
+            type: "toggle",
+            id: "priority_speed",
+            label: "Speed",
+            value: true,
+          },
+        ],
+      }),
+      snap({ id: "r2", createdAt: "2" }),
+    ],
+    { suggestedName: "草稿" },
+  );
+  assert.equal(result.virtualRoot, true);
+  const main = result.nodes.find((n) => n.key === "main");
+  assert.ok(main);
+  assert.equal(main.modeId, "acceptEdits");
+  assert.equal(main.speedFeatureId, "priority_speed");
+  assert.equal(main.speedFeatureValue, true);
 });
 
 test("导入:不复制任何消息历史或密钥字段", () => {

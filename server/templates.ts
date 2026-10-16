@@ -9,6 +9,7 @@ import {
   type TemplateNodeConfig,
 } from "../shared/template-model";
 import { createTaskFromTemplateRpc, importTemplateRpc } from "../shared/templates";
+import { pickSpeedFeature, speedSelectionValid, type RawFeatureDescriptor } from "../shared/provider-speed";
 
 const PAGE_LIMIT = 200;
 /** 单次 RPC 内最多逐个刷新的快照数,防止超大盘 workspace 拖垮导入 */
@@ -25,12 +26,14 @@ interface ModelEntry {
 }
 
 /**
- * 创建前预检:显式指定的 model/thinking 必须能在真实目录里确认支持,
+ * 创建前预检:显式指定的 model/thinking/mode/速度必须能在真实目录里确认支持,
  * 列表为空/拉取失败时同样拒绝,绝不静默跳过或替换配置。
+ * cwd 用于 listFeatures 草稿配置(workspace 缺目录时速度无法确认,按失败拒绝)。
  */
 export async function prevalidateConfigs(
   paseo: PaseoApi,
   nodes: readonly TemplateNodeConfig[],
+  cwd?: string | null,
 ): Promise<string[]> {
   const errors: string[] = [];
 
@@ -50,6 +53,33 @@ export async function prevalidateConfigs(
 
   const modelsCache = new Map<string, ModelEntry[] | null>();
   const modesCache = new Map<string, string[] | null>();
+  /** key = provider/model + mode + thinking,缓存 listFeatures 结果(null 表示拉取失败) */
+  const featuresCache = new Map<string, RawFeatureDescriptor[] | null>();
+
+  const loadFeatures = async (
+    provider: string,
+    model: string,
+    modeId: string | undefined,
+    thinkingId: string | null,
+  ): Promise<RawFeatureDescriptor[] | null> => {
+    const cacheKey = `${provider}/${model}|${modeId ?? ""}|${thinkingId ?? ""}`;
+    let features = featuresCache.get(cacheKey);
+    if (features === undefined) {
+      try {
+        const result = await paseo.providers.listFeatures({
+          provider: `${provider}/${model}`,
+          cwd: cwd ?? "",
+          ...(modeId ? { modeId } : {}),
+          ...(thinkingId ? { thinkingOptionId: thinkingId } : {}),
+        });
+        features = result.features ?? [];
+      } catch {
+        features = null;
+      }
+      featuresCache.set(cacheKey, features);
+    }
+    return features;
+  };
 
   for (const node of nodes) {
     const label = `节点 ${node.key}`;
@@ -118,6 +148,42 @@ export async function prevalidateConfigs(
       }
       if (modes && modes.length > 0 && !modes.includes(node.modeId)) {
         errors.push(`${label}:模式 ${node.modeId} 不在提供方 ${node.provider} 的可用模式中`);
+      }
+    }
+
+    // 速度预检:显式配置的速度 feature/取值必须被真实 descriptor 确认支持
+    if (node.speedFeatureId) {
+      if (!cwd) {
+        errors.push(`${label}:workspace 缺少目录信息,无法确认速度 ${node.speedFeatureId}`);
+        continue;
+      }
+      const features = await loadFeatures(node.provider, node.model, node.modeId, node.thinkingOptionId);
+      if (!features) {
+        errors.push(`${label}:速度特性目录拉取失败,无法确认 ${node.speedFeatureId}`);
+        continue;
+      }
+      const feature = pickSpeedFeature(features);
+      if (!feature || feature.id !== node.speedFeatureId) {
+        errors.push(
+          feature
+            ? `${label}:速度特性 ${node.speedFeatureId} 与当前目录不符(实际为 ${feature.id})`
+            : `${label}:提供方 ${node.provider} 未提供速度特性,不支持 ${node.speedFeatureId}`,
+        );
+        continue;
+      }
+      const value = node.speedFeatureValue;
+      if (feature.type === "toggle") {
+        if (value !== true) {
+          errors.push(`${label}:速度 ${feature.label} 为开关形态,取值只支持开启(true)`);
+        }
+        continue;
+      }
+      const selection = typeof value === "string" ? value : null;
+      if (!speedSelectionValid(feature, selection)) {
+        const optionIds = (feature.options ?? []).map((option) => option.id).join(", ");
+        errors.push(
+          `${label}:速度选项 ${String(value)} 不在 ${feature.label} 的可选列表中(${optionIds || "无选项"})`,
+        );
       }
     }
   }
@@ -193,6 +259,7 @@ export async function handleImportTemplate(
         model: agent.model,
         thinkingOptionId: agent.thinkingOptionId ?? null,
         modeId: agent.currentModeId ?? null,
+        features: (agent.features ?? []) as RawFeatureDescriptor[],
         archivedAt: null,
         createdAt: agent.createdAt,
         labels: agent.labels,
@@ -236,7 +303,7 @@ export async function handleCreateTaskFromTemplate(
     };
   }
 
-  const validationErrors = await prevalidateConfigs(paseo, nodes);
+  const validationErrors = await prevalidateConfigs(paseo, nodes, workspace.workspaceDirectory ?? null);
   if (validationErrors.length > 0) {
     return { ok: false, rootAgentId: null, createdAgentIds: [], validationErrors, error: null };
   }
@@ -266,6 +333,10 @@ export async function handleCreateTaskFromTemplate(
           provider: `${node.provider}/${node.model}`,
           ...(node.thinkingOptionId ? { thinkingOptionId: node.thinkingOptionId } : {}),
           ...(node.modeId ? { modeId: node.modeId } : {}),
+          // 速度:仅在显式配置时传入 featureValues(预检已确认 id/取值合法)
+          ...(node.speedFeatureId
+            ? { featureValues: { [node.speedFeatureId]: node.speedFeatureValue } }
+            : {}),
         },
         // 主节点用任务标题,后代用模板标题;空标题交给 daemon 自动生成
         title: parentAgentId ? node.title || undefined : title,

@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { usePaseo } from "@getpaseo/plugin/client";
+import { usePaseo, useWorkspace } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
+import {
+  pickSpeedFeature,
+  speedFeatureValuesForSelection,
+  speedSelectionValid,
+  type SpeedFeatureDescriptor,
+} from "../shared/provider-speed";
 
 /** 下拉选项的统一形状 */
 interface PickerRow {
@@ -18,7 +24,7 @@ interface ModelOption {
   defaultThinkingOptionId?: string | null;
 }
 
-/** 面板底部的新建子代理表单:选提供方/模型/思考强度,可选标题与首条消息。 */
+/** 面板底部的新建子代理表单:选提供方/模型/思考强度/权限模式/速度,可选标题与首条消息。 */
 export function CreateAgentPanel({
   parentAgentId,
   parentProvider,
@@ -41,6 +47,8 @@ export function CreateAgentPanel({
 }) {
   const paseo = usePaseo();
   const toast = useToast();
+  // workspace 目录是 listFeatures 草稿配置的必填项;未加载/缺失时隐藏速度选项
+  const cwd = useWorkspace(workspaceId, (workspace) => workspace.directory);
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [providers, setProviders] = useState<PickerRow[] | null>(null);
@@ -48,8 +56,21 @@ export function CreateAgentPanel({
   const [models, setModels] = useState<ModelOption[] | null>(null);
   const [modelId, setModelId] = useState<string | null>(null);
   const [thinkingId, setThinkingId] = useState("");
+  // 权限模式:null 加载中,[] 无模式(整行隐藏),"" 表示默认(不传 modeId,不自动选 bypass)
+  const [modes, setModes] = useState<PickerRow[] | null>(null);
+  const [modeId, setModeId] = useState("");
+  // 速度:undefined 目录加载中,null 当前组合不支持(隐藏),否则为 descriptor
+  const [speed, setSpeed] = useState<SpeedFeatureDescriptor | null | undefined>(undefined);
+  // 速度选择:"" 未指定,select 为 option id,toggle 为 "on"
+  const [speedSelection, setSpeedSelection] = useState("");
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+
+  const resetModeAndSpeed = useCallback(() => {
+    setModeId("");
+    setSpeed(undefined);
+    setSpeedSelection("");
+  }, []);
 
   // mount 时拉取可用提供方,默认选父 agent 的 provider(在列表中时)
   useEffect(() => {
@@ -83,6 +104,8 @@ export function CreateAgentPanel({
     setModels(null);
     setModelId(null);
     setThinkingId("");
+    // 切 provider 清除旧 mode/速度选择,避免把不适配的配置带过去
+    resetModeAndSpeed();
     if (!providerId) return;
     paseo.providers
       .listModels(providerId)
@@ -105,7 +128,30 @@ export function CreateAgentPanel({
     return () => {
       cancelled = true;
     };
-  }, [paseo, providerId, parentModel]);
+  }, [paseo, providerId, parentModel, resetModeAndSpeed]);
+
+  // 提供方变化 → 拉真实模式列表(listModes);含默认选项(不传 modeId),失败时按无模式隐藏
+  useEffect(() => {
+    let cancelled = false;
+    setModes(null);
+    setModeId("");
+    if (!providerId) {
+      setModes([]);
+      return;
+    }
+    paseo.providers
+      .listModes(providerId)
+      .then((result) => {
+        if (cancelled) return;
+        setModes((result.modes ?? []).map((mode) => ({ id: mode.id, label: mode.label || mode.id })));
+      })
+      .catch(() => {
+        if (!cancelled) setModes([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [paseo, providerId]);
 
   const currentModel = useMemo(
     () => models?.find((model) => model.id === modelId) ?? null,
@@ -135,6 +181,45 @@ export function CreateAgentPanel({
     setThinkingId(defaultId ?? "");
   }, [currentModel]);
 
+  // provider/model/mode/思考强度变化 → 拉真实特性目录(listFeatures 需 provider/model 组合串与 cwd);
+  // 只挑速度 descriptor,未知/不支持时保持 null(整行隐藏且不传 featureValues)。
+  // 已选速度在这里不清空:provider/model 切换由各自 effect 清除,mode/思考变化后若仍受支持则保留。
+  useEffect(() => {
+    let cancelled = false;
+    setSpeed(undefined);
+    if (!providerId || !modelId || !cwd) {
+      setSpeed(null);
+      setSpeedSelection("");
+      return;
+    }
+    paseo.providers
+      .listFeatures({
+        provider: `${providerId}/${modelId}`,
+        cwd,
+        ...(modeId ? { modeId } : {}),
+        ...(thinkingId ? { thinkingOptionId: thinkingId } : {}),
+      })
+      .then((result) => {
+        if (cancelled) return;
+        const found = pickSpeedFeature(result.features ?? []);
+        setSpeed(found);
+        // 目录刷新后已选项不再受支持时清除,避免把非法值带进创建请求
+        setSpeedSelection((prev) => (found && speedSelectionValid(found, prev) ? prev : ""));
+      })
+      .catch(() => {
+        if (!cancelled) setSpeed(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [paseo, providerId, modelId, modeId, thinkingId, cwd]);
+
+  // 速度选择 → featureValues(仅显式选择时传;descriptor 未就绪/不支持时不传)
+  const speedValues = useMemo(
+    () => (speed && speedSelection ? speedFeatureValuesForSelection(speed, speedSelection) : null),
+    [speed, speedSelection],
+  );
+
   const handleCreate = useCallback(async () => {
     if (!providerId || !modelId || creating) return;
     setCreating(true);
@@ -143,6 +228,9 @@ export function CreateAgentPanel({
         config: {
           provider: `${providerId}/${modelId}`,
           ...(thinkingId ? { thinkingOptionId: thinkingId } : {}),
+          // 权限模式:仅显式选择时传 modeId(默认不传,由 daemon/提供方按默认行为处理)
+          ...(modeId ? { modeId } : {}),
+          ...(speedValues ? { featureValues: speedValues } : {}),
         },
         parent: parentAgentId,
         ...(title.trim() ? { title: title.trim() } : {}),
@@ -161,6 +249,8 @@ export function CreateAgentPanel({
     providerId,
     modelId,
     thinkingId,
+    modeId,
+    speedValues,
     parentAgentId,
     title,
     prompt,
@@ -341,10 +431,41 @@ export function CreateAgentPanel({
         "模型",
         models?.map((model) => ({ id: model.id, label: model.label || model.id })) ?? null,
         modelId,
-        (id) => setModelId(id),
+        (id) => {
+          if (id === modelId) return;
+          // 显式切模型:同步清除旧 mode/速度选择,防止异步目录返回前误用旧值
+          setModelId(id);
+          resetModeAndSpeed();
+        },
       )}
+      {modes && modes.length > 0
+        ? renderPicker(
+            "mode",
+            "权限模式",
+            [{ id: "", label: "默认(不指定)" }, ...modes],
+            modeId,
+            (id) => setModeId(id),
+          )
+        : null}
       {thinkingRows
         ? renderPicker("thinking", "思考强度", thinkingRows, thinkingId, (id) => setThinkingId(id))
+        : null}
+      {speed
+        ? renderPicker(
+            "speed",
+            speed.label || "速度",
+            speed.type === "toggle"
+              ? [
+                  { id: "", label: "默认(不指定)" },
+                  { id: "on", label: "开启" },
+                ]
+              : [
+                  { id: "", label: "默认(不指定)" },
+                  ...(speed.options ?? []).map((option) => ({ id: option.id, label: option.label })),
+                ],
+            speedSelection,
+            (id) => setSpeedSelection(id),
+          )
         : null}
       <View>
         <Text style={styles.fieldLabel}>首条消息</Text>
