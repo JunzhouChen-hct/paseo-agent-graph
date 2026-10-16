@@ -699,7 +699,7 @@ export function AgentConsole({
       <View style={styles.header}>
         <Icon name="MessagesSquare" size={13} color={theme.colors.foregroundMuted} />
         <Text style={styles.headerTitle} numberOfLines={1}>
-          {agentLive?.title || "会话"}
+          {agentLive?.title?.trim() || "会话"}
         </Text>
         {queueCount > 0 ? (
           <View style={styles.queueBadge}>
