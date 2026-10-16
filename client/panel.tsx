@@ -10,6 +10,7 @@ import { AgentCard, type CardMeta } from "./card";
 import { GraphEdge } from "./edge";
 import { AgentConsole } from "./console";
 import { CreateAgentPanel } from "./create-agent";
+import { TemplatesView } from "./templates";
 
 const CARD_W = 196;
 const CARD_W_COMPACT = 164;
@@ -28,6 +29,8 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
   const [selected, setSelected] = useState<string | null>(null);
   const [archivedOverride, setArchivedOverride] = useState<boolean | null>(null);
   const [panelWidth, setPanelWidth] = useState(0);
+  // "graph" 为节点图;"templates" 为节点模板管理视图
+  const [view, setView] = useState<"graph" | "templates">("graph");
   // 部分宿主上根 View 的 onLayout 不回调(诊断日志显示恒为 0),用窗口尺寸兜底扣除页面边距
   const windowDims = useWindowDimensions();
   const measuredWidth =
@@ -244,6 +247,18 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     [theme, layout.compact, showArchived],
   );
 
+  if (view === "templates") {
+    return (
+      <TemplatesView
+        workspaceId={workspaceId}
+        theme={theme}
+        compact={layout.compact}
+        onBack={() => setView("graph")}
+        openAgent={openAgent}
+      />
+    );
+  }
+
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
@@ -268,6 +283,15 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
           <Text style={styles.chipText}>归档 {stats.archived}</Text>
         </View>
         <View style={styles.spacer} />
+        <Pressable
+          style={styles.archivedToggle}
+          onPress={() => setView("templates")}
+          accessibilityRole="button"
+          accessibilityLabel="打开节点模板"
+        >
+          <Icon name="LayoutTemplate" size={12} color={theme.colors.foregroundMuted} />
+          <Text style={styles.archivedToggleText}>节点模板</Text>
+        </Pressable>
         <Pressable
           style={styles.archivedToggle}
           onPress={() => setArchivedOverride(!showArchived)}
