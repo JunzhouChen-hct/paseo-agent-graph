@@ -472,15 +472,18 @@ export function AgentConsole({
     // agentId 变化时 agentLive 可能还是旧值,下一轮 status 订阅更新会把 prevStatusRef 校准
   }, [agentId, updatePendingQueue]); // 仅在切换 agent 时重置(故意不依赖 agentLive.status)
 
-  // 打开内置会话即验收"待验收":仅 finished(上回合完成通知)按"非 finished → finished"
-  // 迁移沿触发一次验收 RPC;permission/error 关注与真实运行状态不动;server 端还会对
-  // daemon 最新快照 fresh 复核后才 clear。边界:
-  // - 打开时会话已 finished:挂载后首个快照即构成迁移沿(prev=false)
-  // - 打开后 running→finished:状态迁移触发;持续 finished 不重复
+  // 打开内置会话即验收"待验收":仅 status==='idle' 且 finished(上回合完成通知)
+  // 按"非该状态 → 该状态"迁移沿触发一次验收 RPC。status 必须为 idle:真实运行中
+  // 可携带上一轮 finished 关注(见 toneOf 特判),此刻不清,等真正转 idle 的 status
+  // 沿再验收;permission/error 关注与运行状态一律不动。server 端还会对 daemon 最新
+  // 快照 fresh 复核后才 clear。边界:
+  // - 打开时会话已 idle+finished:挂载后首个快照即构成迁移沿(prev=false)
+  // - 打开后 running→idle(带 finished):status 迁移触发;持续 idle+finished 不重复
   // - 会话切换:agentId effect 重置迁移沿,旧会话通知不受影响
-  // - 失败:不自动重试(toast 提示),重开面板或出现新的 finished 通知时再验收
+  // - 失败:不自动重试(toast 提示),重开面板或再次进入该状态时再验收
   useEffect(() => {
-    const isFinished = !!(agentLive?.requiresAttention && agentLive.attentionReason === "finished");
+    const isFinished =
+      agentLive?.status === "idle" && !!agentLive.requiresAttention && agentLive.attentionReason === "finished";
     const wasFinished = prevFinishedAttentionRef.current;
     prevFinishedAttentionRef.current = isFinished;
     if (!isFinished || wasFinished) return;
@@ -492,6 +495,7 @@ export function AgentConsole({
         toast.error(err instanceof Error ? err.message : "验收失败");
       });
   }, [
+    agentLive?.status,
     agentLive?.requiresAttention,
     agentLive?.attentionReason,
     agentId,
