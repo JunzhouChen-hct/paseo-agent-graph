@@ -1,4 +1,5 @@
 import { createElement, type ComponentType } from "react";
+import { debugReportRpc } from "../shared/graph";
 import type { PluginClientContext, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 
 /** 原生手机使用独立标签 ID，避免复用到历史上不可见的面板位置。
@@ -60,10 +61,17 @@ export function contributeMobileEntry(client: PluginClientContext, openWorkspace
     for (const id of ids) {
       if (buttons.has(id)) continue;
       buttons.set(id, client.addHeaderButton({
-        id: "open-agent-graph", workspaceId: id,
+        // 手机客户端的动作分发也使用按钮身份；跨工作区不复用同一个 ID。
+        id: workspaceGraphPanelId("open-agent-graph", id), workspaceId: id,
         button: {
           title: "打开节点图", icon: "Workflow", label: "节点图",
-          behavior: { kind: "action", onPress: () => openWorkspaceGraph(id) },
+          behavior: { kind: "action", onPress: () => {
+            // 仅点击时记录真实目标，便于核对手机是否收到新版入口，不轮询。
+            void client.rpc(debugReportRpc, { payload: JSON.stringify({
+              event: "graph-header-open", entryVersion: "workspace-button-v2", workspaceId: id,
+            }) }).catch(() => undefined);
+            openWorkspaceGraph(id);
+          } },
         },
       }));
     }

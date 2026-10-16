@@ -213,6 +213,9 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
   reportRef.current = useRpc(debugReportRpc);
   useEffect(() => {
     const payload = JSON.stringify({
+      entryVersion: "workspace-button-v2",
+      workspaceId,
+      platform: layout.platform,
       compact: layout.compact,
       panelWidth: measuredWidth,
       panelWidthReported: panelWidth,
@@ -241,7 +244,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     });
     const timer = setTimeout(() => void reportRef.current({ payload }), 1500);
     return () => clearTimeout(timer);
-  }, [layout.compact, measuredWidth, panelWidth, windowDims.width, maxRowWidth, ready, error, projectId, projectName, workspaces.length, agents.length, visible.length, metas, layoutResult, edges.length]);
+  }, [workspaceId, layout.platform, layout.compact, measuredWidth, panelWidth, windowDims.width, maxRowWidth, ready, error, projectId, projectName, workspaces.length, agents.length, visible.length, metas, layoutResult, edges.length]);
 
   const openAgent = useCallback(
     (agentId: string) => {

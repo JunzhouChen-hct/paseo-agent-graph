@@ -24,6 +24,7 @@ function harness() {
       return { remove: () => buttons.delete(value.workspaceId) };
     },
     openPanel: (...args: unknown[]) => opened.push(args),
+    rpc: async () => ({ ok: true }),
   } as unknown as PluginClientContext;
   return { client, buttons, opened, subscription,
     bootstrap: () => resolveBootstrap({ subscription }),
@@ -100,4 +101,28 @@ test("两个项目分别打开、来回切换时，不复用其他工作区的�
   assert.equal(disposed, 2);
   registry.open("project-c-workspace");
   assert.equal(panels.size, 0);
+});
+
+
+test("跨工作区的快捷按钮身份不同，按按钮 ID 分发也不会命中其他项目", async () => {
+  const h = harness();
+  const actions = new Map<string, () => void>();
+  const opened: string[] = [];
+  h.client.addHeaderButton = (value: any) => {
+    // 覆盖旧实现遗漏的按钮层：相同按钮 ID 会覆盖动作，而非按工作区二次索引。
+    actions.set(value.id, value.button.behavior.onPress);
+    return { update() {}, remove: () => { actions.delete(value.id); } };
+  };
+  const stop = contributeMobileEntry(h.client, (id) => opened.push(id));
+  h.bootstrap();
+  await tick();
+  h.observer.snapshot({ entries: [{ id: "paseo-project" }, { id: "gitkrab-project" }], pageInfo: { hasMore: false } });
+  await tick();
+  assert.equal(actions.size, 2);
+  actions.get(workspaceGraphPanelId("open-agent-graph", "paseo-project"))!();
+  actions.get(workspaceGraphPanelId("open-agent-graph", "gitkrab-project"))!();
+  actions.get(workspaceGraphPanelId("open-agent-graph", "paseo-project"))!();
+  assert.deepEqual(opened, ["paseo-project", "gitkrab-project", "paseo-project"]);
+  stop();
+  assert.equal(actions.size, 0);
 });
