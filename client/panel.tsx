@@ -9,6 +9,7 @@ import { computeLayout, type LayoutResult } from "./layout";
 import { AgentCard, type CardMeta } from "./card";
 import { GraphEdge } from "./edge";
 import { AgentConsole } from "./console";
+import { CreateAgentPanel } from "./create-agent";
 
 const CARD_W = 196;
 const CARD_W_COMPACT = 164;
@@ -156,6 +157,12 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     },
     [navigation, host.id],
   );
+
+  // "create:<父agentId>" 哨兵表示创建模式,底部渲染新建表单而非会话控制台
+  const createParentId = selected?.startsWith("create:") ? selected.slice("create:".length) : null;
+  const createParent = createParentId
+    ? agents.find((agent) => agent.id === createParentId)
+    : undefined;
 
   const handleStop = useCallback(
     async (agentId: string) => {
@@ -363,6 +370,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                       onPress={() => setSelected((current) => (current === agent.id ? null : agent.id))}
                       onMeta={handleMeta}
                       onOpenAgent={() => openAgent(agent.id)}
+                      onCreateChild={() => setSelected(`create:${agent.id}`)}
                       onStop={() => void handleStop(agent.id)}
                       onArchive={() => void handleArchive(agent.id)}
                     />
@@ -375,7 +383,18 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
         </ScrollView>
       )}
 
-      {selected ? (
+      {createParentId ? (
+        <CreateAgentPanel
+          parentAgentId={createParentId}
+          parentProvider={createParent?.provider}
+          parentModel={createParent?.model ?? undefined}
+          workspaceId={workspaceId}
+          theme={theme}
+          compact={layout.compact}
+          onDone={(newAgentId) => setSelected(newAgentId)}
+          onCancel={() => setSelected(null)}
+        />
+      ) : selected ? (
         <AgentConsole
           agentId={selected}
           theme={theme}

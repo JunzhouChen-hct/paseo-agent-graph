@@ -30,6 +30,7 @@ export interface AgentCardProps {
   onPress(): void;
   onMeta(agentId: string, meta: CardMeta): void;
   onOpenAgent(): void;
+  onCreateChild(): void;
   onStop(): void;
   onArchive(): void;
 }
@@ -72,6 +73,7 @@ export const AgentCard = memo(function AgentCard({
   onPress,
   onMeta,
   onOpenAgent,
+  onCreateChild,
   onStop,
   onArchive,
 }: AgentCardProps) {
@@ -231,6 +233,14 @@ export const AgentCard = memo(function AgentCard({
         </View>
       </View>
       <View style={styles.actions}>
+        {!archived ? (
+          <>
+            <Pressable style={styles.action} onPress={onCreateChild} accessibilityLabel="新建子代理">
+              <Icon name="Plus" size={14} color={theme.colors.foregroundMuted} />
+            </Pressable>
+            <View style={styles.actionDivider} />
+          </>
+        ) : null}
         {canOpenAgent ? (
           <>
             <Pressable style={styles.action} onPress={onOpenAgent} accessibilityLabel="打开原 Agent 会话">
