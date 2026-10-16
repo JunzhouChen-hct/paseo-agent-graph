@@ -15,6 +15,10 @@ import { pickSpeedFeature } from "./provider-speed";
  *   不调用 listFeatures 也不用 catalog 默认值冒充实际速度。
  * - 开发分支:由 server 端从 worktree 提示 label 或 agent.cwd 的真实 git 查询得出,
  *   提取函数先占位为 null,server 覆盖。
+ * - 上下文窗口:取完整快照 lastUsage.contextWindowUsedTokens / contextWindowMaxTokens,
+ *   只用这两个专用字段,不用 inputTokens/outputTokens 等累计值冒充上下文;
+ *   来源缺失、非有限、负值按未知(null)处理,max<=0 视为未知,
+ *   不猜默认窗口;两侧都未知时整体为 null。
  */
 
 /** 完整快照中与节点元数据相关的最小结构:宽进,缺失字段按未知处理。 */
@@ -26,6 +30,15 @@ export interface AgentFeatureLite {
   options?: { id: string; label: string; isDefault?: boolean }[];
 }
 
+/** 完整快照 lastUsage 中与上下文窗口相关的最小结构:宽进,缺失字段按未知处理。
+ *  累计类 inputTokens/outputTokens 仅为完整快照兼容而保留,提取时不使用。 */
+export interface AgentUsageLite {
+  inputTokens?: number;
+  outputTokens?: number;
+  contextWindowUsedTokens?: number;
+  contextWindowMaxTokens?: number;
+}
+
 export interface AgentMetadataSnapshotLite {
   id: string;
   cwd?: string;
@@ -34,15 +47,24 @@ export interface AgentMetadataSnapshotLite {
   thinkingOptionId?: string | null;
   effectiveThinkingOptionId?: string | null;
   runtimeInfo?: { thinkingOptionId?: string | null } | null;
+  lastUsage?: AgentUsageLite | null;
 }
 
 /** 思考强度的来源标记:effective 为会话生效值,优先级最高。 */
 export type ThinkingSource = "effective" | "configured" | "runtime";
 
+/** 上下文窗口占用:used/max 未知侧为 null;两侧都未知时整体为 null。 */
+export interface AgentMetadataContext {
+  used: number | null;
+  max: number | null;
+}
+
 export interface AgentNodeMetadata {
   thinking: { value: string; source: ThinkingSource } | null;
   speed: { value: string; label: string } | null;
   branch: string | null;
+  /** 上下文窗口占用;快照无可用 usage 时为 null,字段缺省(undefined)兼容旧 schema。 */
+  context?: AgentMetadataContext | null;
 }
 
 export const agentMetadataItemSchema = z.object({
@@ -59,6 +81,13 @@ export const agentMetadataItemSchema = z.object({
     })
     .nullable(),
   branch: z.string().nullable(),
+  context: z
+    .object({
+      used: z.number().nullable(),
+      max: z.number().nullable(),
+    })
+    .nullable()
+    .optional(),
 });
 
 /** 单次 RPC 允许的最大 agent 数(daemon 侧 input 校验同款上限),客户端按此分片。 */
@@ -104,6 +133,24 @@ function speedDisplay(feature: ReturnType<typeof pickSpeedFeature>): { value: st
   return { value, label: option?.label ?? value };
 }
 
+/** usage 数字的宽进校验:非有限 / 负值按未知(null)处理。 */
+function usageNumber(value: number | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * 提取上下文窗口占用:只用 lastUsage 的 contextWindow 专用字段,
+ * 不猜默认窗口,不用 inputTokens/outputTokens 等累计值冒充;
+ * max<=0 视为未知,两侧都未知时整体为 null。
+ */
+function extractContextUsage(usage: AgentUsageLite | null | undefined): AgentMetadataContext | null {
+  const max = usageNumber(usage?.contextWindowMaxTokens);
+  const maxKnown = max !== null && max > 0 ? max : null;
+  const used = usageNumber(usage?.contextWindowUsedTokens);
+  if (used === null && maxKnown === null) return null;
+  return { used, max: maxKnown };
+}
+
 /**
  * 从完整 agent 快照提取卡片元数据(不含分支,分支由 server 端 git 查询得出)。
  * 纯函数,不发起任何 RPC。
@@ -113,7 +160,7 @@ export function extractAgentMetadata(snapshot: AgentMetadataSnapshotLite): Agent
   // 速度识别统一走 pickSpeedFeature(基于真实 descriptor,含 toggle 形态);
   // auto_accept / plan_mode 等权限类 descriptor 不会被误判为速度。
   const speed = speedDisplay(pickSpeedFeature(snapshot.features ?? []));
-  return { thinking, speed, branch: null };
+  return { thinking, speed, branch: null, context: extractContextUsage(snapshot.lastUsage) };
 }
 
 /** 按 RPC 单次上限把 agentIds 切成若干批,空数组返回空批列表。 */

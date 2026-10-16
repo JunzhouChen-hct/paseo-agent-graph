@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   DETACHED_BRANCH_LABEL,
   METADATA_BATCH_SIZE,
+  agentMetadataItemSchema,
   extractAgentMetadata,
   mergeBatchResults,
   splitBatches,
@@ -147,6 +148,73 @@ test("提取:空字符串视为未报告", () => {
   assert.equal(metadata.thinking, null);
 });
 
+test("提取:上下文取 lastUsage 的 contextWindow 专用字段", () => {
+  const metadata = extractAgentMetadata(
+    makeSnapshot({
+      lastUsage: {
+        inputTokens: 1234,
+        outputTokens: 567,
+        contextWindowUsedTokens: 40_000,
+        contextWindowMaxTokens: 400_000,
+      },
+    }),
+  );
+  // 累计 input/output token 不参与,只用 contextWindow 专用字段
+  assert.deepEqual(metadata.context, { used: 40_000, max: 400_000 });
+});
+
+test("提取:无 lastUsage / 空 usage → context 为 null", () => {
+  assert.equal(extractAgentMetadata(makeSnapshot()).context, null);
+  assert.equal(extractAgentMetadata(makeSnapshot({ lastUsage: null })).context, null);
+  assert.equal(extractAgentMetadata(makeSnapshot({ lastUsage: {} })).context, null);
+});
+
+test("提取:上下文负值与非有限值按未知处理", () => {
+  const metadata = extractAgentMetadata(
+    makeSnapshot({
+      lastUsage: { contextWindowUsedTokens: -1, contextWindowMaxTokens: Number.NaN },
+    }),
+  );
+  assert.deepEqual(metadata.context, null);
+  const partial = extractAgentMetadata(
+    makeSnapshot({
+      lastUsage: { contextWindowUsedTokens: Number.POSITIVE_INFINITY, contextWindowMaxTokens: 200_000 },
+    }),
+  );
+  assert.deepEqual(partial.context, { used: null, max: 200_000 });
+});
+
+test("提取:上下文 max<=0 视为未知,used 未知时不猜默认窗口", () => {
+  const zeroMax = extractAgentMetadata(
+    makeSnapshot({ lastUsage: { contextWindowUsedTokens: 100, contextWindowMaxTokens: 0 } }),
+  );
+  assert.deepEqual(zeroMax.context, { used: 100, max: null });
+  const negativeMax = extractAgentMetadata(
+    makeSnapshot({ lastUsage: { contextWindowMaxTokens: -5 } }),
+  );
+  assert.deepEqual(negativeMax.context, null);
+});
+
+test("schema:context 为 optional,旧格式条目仍通过校验", () => {
+  agentMetadataItemSchema.parse({
+    thinking: { value: "high", source: "effective" },
+    speed: null,
+    branch: null,
+  });
+  agentMetadataItemSchema.parse({
+    thinking: null,
+    speed: null,
+    branch: "main",
+    context: { used: null, max: 400_000 },
+  });
+  agentMetadataItemSchema.parse({
+    thinking: null,
+    speed: null,
+    branch: null,
+    context: null,
+  });
+});
+
 test("分片:201 与 450 条按 200 上限切片", () => {
   const ids201 = Array.from({ length: 201 }, (_, index) => `agent-${index}`);
   assert.deepEqual(
@@ -232,6 +300,7 @@ test("handler:组装思考/速度/分支,分支取自提示 label 指向目录",
       thinking: { value: "xhigh", source: "effective" },
       speed: { value: "priority", label: "Fast" },
       branch: "feature/agent-node-metadata",
+      context: null,
     });
   } finally {
     rmSync(hintDir, { recursive: true, force: true });

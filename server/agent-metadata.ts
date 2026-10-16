@@ -158,7 +158,7 @@ function branchDisplay(result: BranchResult): string | null {
 
 /**
  * 批量查询节点元数据。快照走官方 agents.ref(id).refresh() 的完整响应
- * (含 features/effectiveThinkingOptionId),分支用模块级共享解析器
+ * (含 features/effectiveThinkingOptionId/lastUsage),分支用模块级共享解析器
  * (可经 options.branchResolver 注入,测试用),带短缓存与并发去重。
  */
 export async function handleAgentMetadata(
