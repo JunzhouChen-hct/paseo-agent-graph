@@ -26,6 +26,8 @@ export interface AgentCardProps {
   directoryAttention: boolean;
   /** 节点元数据(思考强度/速度模式/开发分支),面板层批量拉取;无数据为 null。 */
   metadata: AgentNodeMetadata | null;
+  /** 该 agent 所属 workspace 的显示标识(项目总览下用于区分跨工作区节点);null 不显示。 */
+  workspaceLabel?: string | null;
   selected: boolean;
   canOpenAgent: boolean;
   statusColors: StatusColors;
@@ -80,6 +82,7 @@ export const AgentCard = memo(function AgentCard({
   directoryStatus,
   directoryAttention,
   metadata,
+  workspaceLabel,
   selected,
   canOpenAgent,
   statusColors,
@@ -202,6 +205,12 @@ export const AgentCard = memo(function AgentCard({
         // 元数据行固定高度,内容缺失时保留占位,卡片高度不随数据抖动
         metaRow: { flexDirection: "row", alignItems: "center", gap: 4, height: 13 },
         metaText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
+        wsText: {
+          flex: 1,
+          color: theme.colors.foregroundMuted,
+          fontSize: 10,
+          lineHeight: 13,
+        },
         actions: {
           flexDirection: "row",
           borderTopWidth: 1,
@@ -257,6 +266,11 @@ export const AgentCard = memo(function AgentCard({
         <View style={styles.statusRow}>
           <View style={[styles.statusDot, { backgroundColor: toneHex }]} />
           <Text style={styles.statusText}>{statusLabel}</Text>
+          {workspaceLabel ? (
+            <Text style={styles.wsText} numberOfLines={1} ellipsizeMode="tail">
+              · {workspaceLabel}
+            </Text>
+          ) : null}
         </View>
         <View style={styles.metaRow}>
           {metaTopText ? (

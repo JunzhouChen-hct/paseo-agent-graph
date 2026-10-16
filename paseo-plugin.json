@@ -1,7 +1,7 @@
 {
   "id": "paseo-agent-graph",
   "name": "Agent Graph",
-  "description": "Workspace 内所有 agent(含已归档)的节点图视图:父子关系连线、运行状态动效、任务流向可视化与快捷管理",
+  "description": "项目内全部工作区的 agent(含已归档)节点图总览:父子关系连线、运行状态动效、任务流向可视化与快捷管理",
   "media": [],
   "requirements": {
     "paseo": ">=0.11.2"

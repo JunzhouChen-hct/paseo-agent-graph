@@ -4,7 +4,13 @@ import { usePaseo, useRpc, useSettings, type PluginWorkspacePanelProps } from "@
 import { Icon, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { cancelAgentRpc, debugReportRpc } from "../shared/graph";
 import { agentGraphSettings, resolveColors, type StatusColors } from "../shared/settings";
-import { useAgentDirectory, type DirectoryAgent } from "./directory";
+import {
+  creationTargetWorkspaceId,
+  truncateWorkspaceLabel,
+  visibleAgents,
+  workspaceBadgeLabel,
+} from "../shared/project-scope";
+import { useProjectAgentDirectory, type DirectoryAgent } from "./directory";
 import { computeLayout, type LayoutResult } from "./layout";
 import { AgentCard, type CardMeta } from "./card";
 import { GraphEdgeFlow, GraphEdgeLine } from "./edge";
@@ -28,7 +34,9 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
   const paseo = usePaseo();
   const toast = useToast();
   const cancelAgent = useRpc(cancelAgentRpc);
-  const { agents, ready, error } = useAgentDirectory(workspaceId);
+  // 展示范围 = 当前 project 的全部 workspace;project 未知前两路订阅都不启动
+  const { projectId, agents, workspaces, projectName, ready, error, retry } =
+    useProjectAgentDirectory(workspaceId);
 
   const [metas, setMetas] = useState<Map<string, CardMeta>>(new Map());
   const [selected, setSelected] = useState<string | null>(null);
@@ -68,9 +76,16 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     setMetas(next);
   }, []);
 
-  const visible = useMemo(
-    () => agents.filter((agent) => showArchived || !agent.archived),
-    [agents, showArchived],
+  const visible = useMemo(() => visibleAgents(agents, showArchived), [agents, showArchived]);
+
+  // 卡片工作区标识:活跃工作区用最新显示名;已归档工作区回落到目录 placement
+  const wsById = useMemo(() => new Map(workspaces.map((ws) => [ws.id, ws])), [workspaces]);
+  const badgeFor = useCallback(
+    (agent: DirectoryAgent) => {
+      const label = workspaceBadgeLabel(agent, wsById);
+      return label ? truncateWorkspaceLabel(label) : null;
+    },
+    [wsById],
   );
 
   // 节点元数据(思考强度/速度模式/开发分支):批量 RPC + 定期轮询
@@ -171,6 +186,9 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       rowWidth: maxRowWidth,
       ready,
       error,
+      projectId,
+      projectName,
+      workspaces: workspaces.length,
       agents: agents.length,
       visible: visible.length,
       metas: metas.size,
@@ -186,7 +204,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     });
     const timer = setTimeout(() => void reportRef.current({ payload }), 1500);
     return () => clearTimeout(timer);
-  }, [layout.compact, measuredWidth, panelWidth, windowDims.width, maxRowWidth, ready, error, agents.length, visible.length, metas, layoutResult, edges.length]);
+  }, [layout.compact, measuredWidth, panelWidth, windowDims.width, maxRowWidth, ready, error, projectId, projectName, workspaces.length, agents.length, visible.length, metas, layoutResult, edges.length]);
 
   const openAgent = useCallback(
     (agentId: string) => {
@@ -195,11 +213,13 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     [navigation, host.id],
   );
 
-  // "create:<父agentId>" 哨兵表示创建模式,底部渲染新建表单而非会话控制台
+  // "create:<父agentId>" 哨兵表示创建模式,底部渲染新建表单而非会话控制台。
+  // 创建目标必须是父 agent 所属 workspace,绝不回落到面板当前 workspace
   const createParentId = selected?.startsWith("create:") ? selected.slice("create:".length) : null;
   const createParent = createParentId
     ? agents.find((agent) => agent.id === createParentId)
     : undefined;
+  const createWorkspaceId = creationTargetWorkspaceId(createParent);
 
   const handleStop = useCallback(
     async (agentId: string) => {
@@ -275,8 +295,22 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
           alignItems: "center",
           justifyContent: "center",
           padding: 24,
+          gap: 10,
         },
         placeholderText: { color: theme.colors.foregroundMuted, fontSize: 13, textAlign: "center" },
+        retryButton: {
+          paddingHorizontal: 16,
+          paddingVertical: 7,
+          borderRadius: 8,
+          backgroundColor: theme.colors.surface2,
+        },
+        retryText: { color: theme.colors.foreground, fontSize: 12 },
+        // header 是 flexWrap 行,占满一整行落到第二行显示
+        scopeHint: {
+          flexBasis: "100%",
+          color: theme.colors.foregroundMuted,
+          fontSize: 10,
+        },
       }),
     [theme, layout.compact, showArchived],
   );
@@ -296,6 +330,14 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
+        {projectName ? (
+          <View style={styles.chip}>
+            <View style={[styles.chipDot, { backgroundColor: theme.colors.accent }]} />
+            <Text style={styles.chipText} numberOfLines={1}>
+              项目 {truncateWorkspaceLabel(projectName, 24)}
+            </Text>
+          </View>
+        ) : null}
         <View style={styles.chip}>
           <View style={[styles.chipDot, { backgroundColor: theme.colors.statusSuccess }]} />
           <Text style={styles.chipText}>运行 {stats.running}</Text>
@@ -335,19 +377,32 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
           <Icon name={showArchived ? "Eye" : "EyeOff"} size={12} color={theme.colors.foregroundMuted} />
           <Text style={styles.archivedToggleText}>已归档</Text>
         </Pressable>
+        {projectName ? (
+          <Text style={styles.scopeHint}>
+            项目总览:展示项目内全部工作区的 agent;节点模板与导入仍只针对当前工作区。
+          </Text>
+        ) : null}
       </View>
 
       {error ? (
         <View style={styles.placeholder}>
           <Text style={styles.placeholderText}>订阅 agent 目录失败:{error}</Text>
+          <Pressable
+            style={styles.retryButton}
+            onPress={retry}
+            accessibilityRole="button"
+            accessibilityLabel="重试订阅"
+          >
+            <Text style={styles.retryText}>重试</Text>
+          </Pressable>
         </View>
       ) : !ready ? (
         <View style={styles.placeholder}>
-          <Text style={styles.placeholderText}>正在加载 agent 目录…</Text>
+          <Text style={styles.placeholderText}>正在加载项目 agent 目录…</Text>
         </View>
       ) : visible.length === 0 ? (
         <View style={styles.placeholder}>
-          <Text style={styles.placeholderText}>当前 workspace 还没有 agent</Text>
+          <Text style={styles.placeholderText}>当前项目还没有 agent</Text>
         </View>
       ) : (
         <ScrollView
@@ -434,6 +489,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                       directoryStatus={agent.status}
                       directoryAttention={agent.requiresAttention}
                       metadata={metadataItems[agent.id] ?? null}
+                      workspaceLabel={badgeFor(agent)}
                       selected={selected === agent.id}
                       canOpenAgent={Boolean(navigation)}
                       statusColors={statusColors}
@@ -454,12 +510,12 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
         </ScrollView>
       )}
 
-      {createParentId ? (
+      {createParent && createWorkspaceId ? (
         <CreateAgentPanel
-          parentAgentId={createParentId}
-          parentProvider={createParent?.provider}
-          parentModel={createParent?.model ?? undefined}
-          workspaceId={workspaceId}
+          parentAgentId={createParent.id}
+          parentProvider={createParent.provider}
+          parentModel={createParent.model ?? undefined}
+          workspaceId={createWorkspaceId}
           theme={theme}
           compact={layout.compact}
           onDone={(newAgentId) => setSelected(newAgentId)}
