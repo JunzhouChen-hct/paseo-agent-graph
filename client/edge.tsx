@@ -13,7 +13,7 @@ const FLOW_DOT = 5;
 const FLOW_SPEED = 0.06;
 
 export interface GraphEdgeLineProps {
-  /** 已规划路径的统一采样(直连贝塞尔或避障绕行);与 GraphEdgeFlow 消费同一对象 */
+  /** 已规划路径的统一采样(正交折线,直落或避障绕行);与 GraphEdgeFlow 消费同一对象 */
   sampled: SampledPath;
   color: string; // 静态线颜色(运行色或主题边框色)
   dim: boolean; // 任一端已归档 → 置淡
@@ -26,8 +26,8 @@ export interface GraphEdgeFlowProps {
 }
 
 /**
- * 静态曲线层:采样折线渲染为短线段 View + rotate,圆头端盖中心恰落在
- * 相邻段共享端点上(等价 SVG round join),接缝无隆起、无缺口。
+ * 静态折线层:正交折线渲染为短线段 View + rotate,圆头端盖中心恰落在
+ * 相邻段共享端点上(等价 SVG round join),直角拐角接缝无隆起、无缺口。
  * 不运行动画;与 GraphEdgeFlow 消费同一份采样。
  */
 export function GraphEdgeLine({ sampled, color, dim }: GraphEdgeLineProps) {

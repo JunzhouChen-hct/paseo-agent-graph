@@ -1,6 +1,7 @@
 /**
- * 边曲线几何纯逻辑:贝塞尔/折线圆角路径的采样与弧长参数化、
- * 线段视图(供 RN View+rotate 绘制)、折线简化与同父出线点分配。
+ * 边几何纯逻辑:正交折线路径的弧长参数化、线段视图(供 RN View+rotate
+ * 绘制)、流点插值表与同父出线点分配。路径即航点折线本身,无贝塞尔、
+ * 无圆弧采样;静态线与流点消费同一份采样。
  * 不依赖 React / React Native,可被 client 与 tests 共用。
  */
 
@@ -14,17 +15,6 @@ export interface SampledPath {
   points: Point[];
   cumulative: number[];
   total: number;
-}
-
-/** 三次贝塞尔直连曲线 */
-export interface EdgeCurve extends SampledPath {
-  /** 曲线起点(父卡片底部出线点) */
-  from: Point;
-  /** 曲线终点(子卡片顶部中点) */
-  to: Point;
-  /** 三次贝塞尔控制点 */
-  cp1: Point;
-  cp2: Point;
 }
 
 /** 流点动画插值所需的 inputRange/outputRange(inputRange 严格递增) */
@@ -49,72 +39,6 @@ export const PATH_MIN_LENGTH = 0.5;
 /** 累计弧长下限:保证插值 inputRange 严格递增 */
 export const CUMULATIVE_EPS = 0.001;
 
-/**
- * 直连贝塞尔自适应细分的弦偏差容差(px):细分后每段弦与真实曲线的
- * 最大距离上界(平坦度判据:0.75 × 控制点到弦线最大距离 ≥ 曲线到弦
- * 线的距离,见 adaptiveCubicPoints)。0.4px 的均匀采样+DP 简化在
- * 典型短边(dx37/dy58)上产生可感知的折角,0.15px 接近 1 物理像素的
- * 一半,再细分不会带来可见改善,只增加视图数。
- */
-export const CURVE_TOLERANCE = 0.15;
-/** 自适应细分最大递归深度(2^-18 ≈ 4e-6 参数步,防退化循环) */
-const MAX_SUBDIV_DEPTH = 18;
-/** 单条曲线细分点数上限(防病态曲线视图爆炸) */
-const MAX_CURVE_POINTS = 160;
-
-/** 点到直线 a-b 的距离(平坦度判据用,带符号无关) */
-function pointLineDistance(p: Point, a: Point, b: Point): number {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const length = Math.hypot(dx, dy);
-  if (length < 1e-12) return Math.hypot(p.x - a.x, p.y - a.y);
-  return Math.abs((p.x - a.x) * dy - (p.y - a.y) * dx) / length;
-}
-
-/**
- * 三次贝塞尔平坦度自适应细分(de Casteljau 中点二分):
- * 控制点到弦线距离的最大者 × 3/4 是曲线偏离弦线的上界,低于容差即
- * 以弦 [p0,p3] 收尾;否则中点分裂递归。曲率低处弦长,曲率高处弦短,
- * 相比均匀 t 采样用更少的段达到更小的几何误差。
- */
-function adaptiveCubicPoints(
-  p0: Point,
-  p1: Point,
-  p2: Point,
-  p3: Point,
-  tolerance: number,
-  depth: number,
-  out: Point[],
-): void {
-  const flatness =
-    (3 / 4) * Math.max(pointLineDistance(p1, p0, p3), pointLineDistance(p2, p0, p3));
-  if (flatness <= tolerance || depth >= MAX_SUBDIV_DEPTH || out.length >= MAX_CURVE_POINTS) {
-    out.push(p3);
-    return;
-  }
-  const p01 = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
-  const p12 = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-  const p23 = { x: (p2.x + p3.x) / 2, y: (p2.y + p3.y) / 2 };
-  const p012 = { x: (p01.x + p12.x) / 2, y: (p01.y + p12.y) / 2 };
-  const p123 = { x: (p12.x + p23.x) / 2, y: (p12.y + p23.y) / 2 };
-  const mid = { x: (p012.x + p123.x) / 2, y: (p012.y + p123.y) / 2 };
-  adaptiveCubicPoints(p0, p01, p012, mid, tolerance, depth + 1, out);
-  adaptiveCubicPoints(mid, p123, p23, p3, tolerance, depth + 1, out);
-}
-
-/** 三次贝塞尔取点 */
-export function cubicBezierPoint(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
-  const u = 1 - t;
-  const a = u * u * u;
-  const b = 3 * u * u * t;
-  const c = 3 * u * t * t;
-  const d = t * t * t;
-  return {
-    x: a * p0.x + b * p1.x + c * p2.x + d * p3.x,
-    y: a * p0.y + b * p1.y + c * p2.y + d * p3.y,
-  };
-}
-
 /** 折线累计弧长;相邻重合点夹极小步进,保持严格递增 */
 function cumulativeLengths(points: Point[]): number[] {
   const list = [0];
@@ -128,80 +52,12 @@ function cumulativeLengths(points: Point[]): number[] {
   return list;
 }
 
-/** 点到线段的最短距离(Douglas-Peucker 用) */
-function pointSegmentDistance(p: Point, a: Point, b: Point): number {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const lengthSq = dx * dx + dy * dy;
-  if (lengthSq < 1e-12) return Math.hypot(p.x - a.x, p.y - a.y);
-  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSq;
-  t = Math.min(Math.max(t, 0), 1);
-  return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
-}
-
 /**
- * Douglas-Peucker 折线简化:在容差内合并共线采样点,
- * 大幅减少渲染线段数(接缝与视图数量同步下降),保留端点。
+ * 把路径航点转成采样路径:去掉连续重复点后逐段累计弧长。
+ * 正交折线不做任何重采样/简化——渲染折线与航点一一对应,
+ * 静态线段视图与流点插值消费同一份 points。
  */
-export function simplifyPolyline(points: readonly Point[], tolerance: number): Point[] {
-  if (points.length <= 2) return [...points];
-  const keep = new Array<boolean>(points.length).fill(false);
-  keep[0] = true;
-  keep[points.length - 1] = true;
-  const stack: Array<[number, number]> = [[0, points.length - 1]];
-  while (stack.length > 0) {
-    const [lo, hi] = stack.pop()!;
-    if (hi - lo < 2) continue;
-    const a = points[lo]!;
-    const b = points[hi]!;
-    let maxDist = -1;
-    let maxIndex = -1;
-    for (let i = lo + 1; i < hi; i++) {
-      const dist = pointSegmentDistance(points[i]!, a, b);
-      if (dist > maxDist) {
-        maxDist = dist;
-        maxIndex = i;
-      }
-    }
-    if (maxDist > tolerance && maxIndex > 0) {
-      keep[maxIndex] = true;
-      stack.push([lo, maxIndex], [maxIndex, hi]);
-    }
-  }
-  return points.filter((_, index) => keep[index]);
-}
-
-/**
- * 构建“竖直切出”的三次贝塞尔直连曲线:两端切线均竖直,
- * 控制距离随垂直距离缩放并夹在 [20, 90]。
- * 采样用平坦度自适应细分:每段弦对真实曲线的偏差 ≤ CURVE_TOLERANCE,
- * 直段处弦自动变长(视图少),曲率大处弦自动变短(误差可控),
- * 相邻段共享端点,配合圆头渲染即成圆角接缝(见 buildSegmentViews)。
- */
-export function buildEdgeCurve(from: Point, to: Point): EdgeCurve {
-  const dy = to.y - from.y;
-  // 两端完全重合时控制距离取 0,曲线收敛为一点(全零长退化路径)
-  const control =
-    from.x === to.x && dy === 0 ? 0 : Math.min(90, Math.max(20, Math.abs(dy) * 0.45));
-  const cp1: Point = { x: from.x, y: from.y + control };
-  const cp2: Point = { x: to.x, y: to.y - control };
-
-  const points: Point[] = [from];
-  adaptiveCubicPoints(from, cp1, cp2, to, CURVE_TOLERANCE, 0, points);
-  const cumulative = cumulativeLengths(points);
-  // 全零弧长(重合点)时夹一个极小值,保证 inputRange 严格递增不产生 NaN
-  const total = cumulative[cumulative.length - 1] ?? 0;
-  return { from, to, cp1, cp2, points, cumulative, total };
-}
-
-/**
- * 把路径航点(折线拐点)转成圆角采样路径:每个内拐角用二次贝塞尔圆角,
- * 直段保持直线。直线与圆角统一进 points/cumulative/total,
- * 渲染层(静态线与流点)消费同一份采样,保证流点严格贴线。
- * filletRadius 会被相邻直段长度收缩,直段过短时退化为尖角。
- */
-export function buildPathCurve(waypoints: readonly Point[], filletRadius = 14): SampledPath {
-  // 去掉连续重复点
+export function buildPolylinePath(waypoints: readonly Point[]): SampledPath {
   const pts: Point[] = [];
   for (const point of waypoints) {
     const prev = pts[pts.length - 1];
@@ -211,99 +67,15 @@ export function buildPathCurve(waypoints: readonly Point[], filletRadius = 14): 
     return { points: [], cumulative: [], total: 0 };
   }
   if (pts.length === 1) {
-    return { points: [pts[0]!, { ...pts[0]! }], cumulative: [0, CUMULATIVE_EPS], total: CUMULATIVE_EPS };
-  }
-  if (pts.length === 2) {
     return {
-      points: [pts[0]!, pts[1]!],
-      cumulative: cumulativeLengths([pts[0]!, pts[1]!]),
-      total: Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y),
+      points: [pts[0]!, { ...pts[0]! }],
+      cumulative: [0, CUMULATIVE_EPS],
+      total: CUMULATIVE_EPS,
     };
   }
-
-  const FILLET_SAMPLES = 8;
-  const points: Point[] = [pts[0]!];
-  for (let i = 1; i < pts.length - 1; i++) {
-    const prev = pts[i - 1]!;
-    const corner = pts[i]!;
-    const next = pts[i + 1]!;
-    const inLeg = Math.hypot(corner.x - prev.x, corner.y - prev.y);
-    const outLeg = Math.hypot(next.x - corner.x, next.y - corner.y);
-    const radius = Math.min(filletRadius, inLeg / 2 - 0.01, outLeg / 2 - 0.01);
-    if (radius <= 0.5) {
-      points.push(corner); // 直段太短,保留尖角
-      continue;
-    }
-    const inPoint: Point = {
-      x: corner.x - ((corner.x - prev.x) / inLeg) * radius,
-      y: corner.y - ((corner.y - prev.y) / inLeg) * radius,
-    };
-    const outPoint: Point = {
-      x: corner.x + ((next.x - corner.x) / outLeg) * radius,
-      y: corner.y + ((next.y - corner.y) / outLeg) * radius,
-    };
-    points.push(inPoint);
-    const inDir: Point = { x: (corner.x - prev.x) / inLeg, y: (corner.y - prev.y) / inLeg };
-    const outDir: Point = { x: (next.x - corner.x) / outLeg, y: (next.y - corner.y) / outLeg };
-    const dot = inDir.x * outDir.x + inDir.y * outDir.y;
-    if (Math.abs(dot) < 1e-9) {
-      // 垂直拐角:采样真实圆弧(圆心 = 切点 + 出方向×半径),
-      // 与原生圆角转弯渲染精确一致,流点消费同一弧线
-      const center: Point = { x: inPoint.x + outDir.x * radius, y: inPoint.y + outDir.y * radius };
-      const angle0 = Math.atan2(inPoint.y - center.y, inPoint.x - center.x);
-      let delta = Math.atan2(outPoint.y - center.y, outPoint.x - center.x) - angle0;
-      while (delta > Math.PI) delta -= 2 * Math.PI;
-      while (delta < -Math.PI) delta += 2 * Math.PI;
-      for (let s = 1; s <= FILLET_SAMPLES; s++) {
-        const angle = angle0 + (delta * s) / FILLET_SAMPLES;
-        points.push({
-          x: center.x + Math.cos(angle) * radius,
-          y: center.y + Math.sin(angle) * radius,
-        });
-      }
-    } else {
-      // 非垂直拐角:二次贝塞尔圆角(控制点=拐角)
-      for (let s = 1; s <= FILLET_SAMPLES; s++) {
-        const t = s / FILLET_SAMPLES;
-        const u = 1 - t;
-        points.push({
-          x: u * u * inPoint.x + 2 * u * t * corner.x + t * t * outPoint.x,
-          y: u * u * inPoint.y + 2 * u * t * corner.y + t * t * outPoint.y,
-        });
-      }
-    }
-  }
-  points.push(pts[pts.length - 1]!);
-
-  const cumulative = cumulativeLengths(points);
+  const cumulative = cumulativeLengths(pts);
   const total = cumulative[cumulative.length - 1] ?? 0;
-  return { points, cumulative, total };
-}
-
-/**
- * 弧长 → 曲线上的点(线性插值,近似匀速)。s 越界时夹在 [0, total]。
- */
-export function pointAtLength(path: SampledPath, s: number): Point {
-  const total = path.total;
-  const clamped = Math.min(Math.max(s, 0), total);
-  // 二分查找所在采样段
-  let lo = 0;
-  let hi = path.cumulative.length - 1;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if (path.cumulative[mid]! <= clamped) lo = mid;
-    else hi = mid;
-  }
-  const s0 = path.cumulative[lo]!;
-  const s1 = path.cumulative[hi]!;
-  const span = Math.max(s1 - s0, CUMULATIVE_EPS);
-  const ratio = Math.min(Math.max((clamped - s0) / span, 0), 1);
-  const a = path.points[lo]!;
-  const b = path.points[hi]!;
-  return {
-    x: a.x + (b.x - a.x) * ratio,
-    y: a.y + (b.y - a.y) * ratio,
-  };
+  return { points: pts, cumulative, total };
 }
 
 /** 流点插值表:输入为累计弧长,输出为点坐标偏移掉半径后的画布坐标 */
@@ -320,7 +92,7 @@ export function buildFlowInterpolation(path: SampledPath, dotSize: number): Flow
  * 把采样折线转成旋转矩形线段列表。
  * 两端各延长半线宽:圆头端盖的半圆心恰落在线段端点上——相邻段共享端点时,
  * 两个半圆合成以该端点为心的完整圆盘,即 SVG stroke-linejoin="round" 的
- * 精确语义,拐角外侧无缺口;若不延长(宽=弦长),半圆心内缩 r,
+ * 精确语义,直角拐角外侧无缺口;若不延长(宽=弦长),半圆心内缩 r,
  * 直角拐角外侧会出现约 0.4r 的缺口。
  * 路径首尾由端盖自然收口;跳过近零长段(残差被相邻圆头覆盖)。
  */
