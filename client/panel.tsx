@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { usePaseo, useRpc, useSettings, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { copyText, Icon, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
+import { copyText, Icon, Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { cancelAgentRpc, debugReportRpc } from "../shared/graph";
+import {
+  archivePolicy,
+  freshArchiveVerdict,
+} from "../shared/archive-policy";
+import { PARENT_AGENT_ID_LABEL } from "../shared/template-model";
 import { agentGraphSettings, resolveColors, type StatusColors } from "../shared/settings";
 import {
   creationTargetWorkspaceId,
@@ -262,17 +267,75 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     [cancelAgent, toast],
   );
 
-  const handleArchive = useCallback(
-    async (agentId: string) => {
-      try {
-        await paseo.agents.ref(agentId).archive();
-        toast.show("已归档(归档后不能从面板恢复)");
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : "归档失败");
-      }
+  // 归档确认弹窗:点击卡片归档先弹窗(统一确认);确认时取 fresh snapshot 复查,
+  // 防止弹窗期间状态变化;取消零操作,确认期间锁定按钮与弹窗
+  const [archiveTarget, setArchiveTarget] = useState<{
+    agentId: string;
+    title: string;
+    childFinished: boolean;
+  } | null>(null);
+  const [archiving, setArchiving] = useState(false);
+
+  const requestArchive = useCallback(
+    (agentId: string) => {
+      if (archiving) return;
+      const dirAgent = agents.find((candidate) => candidate.id === agentId);
+      if (!dirAgent || dirAgent.archived) return;
+      const meta = metas.get(agentId) ?? null;
+      const policy = archivePolicy({
+        archived: dirAgent.archived,
+        status: meta?.status ?? dirAgent.status,
+        requiresAttention: meta?.requiresAttention ?? dirAgent.requiresAttention,
+        attentionReason: meta?.attentionReason ?? null,
+        // meta 缺 parentId(卡片的 live 快照未就绪)时为 null,保守按主Agent
+        parentAgentId: meta?.parentId ?? null,
+      });
+      // 卡片按钮本应禁用;兜底零操作
+      if (!policy.canArchive) return;
+      setArchiveTarget({
+        agentId,
+        title: dirAgent.title ?? "未命名 Agent",
+        childFinished: policy.requiresConfirm,
+      });
     },
-    [paseo, toast],
+    [archiving, agents, metas],
   );
+
+  const confirmArchive = useCallback(async () => {
+    const target = archiveTarget;
+    if (!target || archiving) return;
+    setArchiving(true);
+    try {
+      // fresh snapshot 复查:弹窗期间可能开始运行/进入权限等待/被归档
+      const refetched = await paseo.agents.ref(target.agentId).refresh();
+      const fresh = refetched?.agent ?? null;
+      const verdict = freshArchiveVerdict(
+        fresh
+          ? {
+              archivedAt: fresh.archivedAt,
+              status: fresh.status,
+              requiresAttention: fresh.requiresAttention,
+              attentionReason: fresh.attentionReason,
+              // 协议快照无官方 parentAgentId 字段,可靠 label 兜底
+              parentLabel: fresh.labels[PARENT_AGENT_ID_LABEL] ?? null,
+            }
+          : null,
+      );
+      if (verdict !== "allow") {
+        toast.error("状态已变化,已取消归档");
+        setArchiveTarget(null);
+        return;
+      }
+      await paseo.agents.ref(target.agentId).archive();
+      toast.show("已归档(归档后不能从面板恢复)");
+      setArchiveTarget(null);
+    } catch (err) {
+      // 失败可恢复:弹窗保留,可直接重试或取消
+      toast.error(err instanceof Error ? `归档失败:${err.message}` : "归档失败");
+    } finally {
+      setArchiving(false);
+    }
+  }, [archiveTarget, archiving, paseo, toast]);
 
   // 右键/长按卡片复制 Agent ID:copyText 为宿主官方 API,失败明确报错
   const handleCopyId = useCallback(
@@ -352,6 +415,26 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
           color: theme.colors.foregroundMuted,
           fontSize: 10,
         },
+        confirmText: {
+          color: theme.colors.foreground,
+          fontSize: 13,
+          lineHeight: 18,
+        },
+        confirmActions: {
+          flexDirection: "row",
+          justifyContent: "flex-end",
+          gap: 8,
+          marginTop: 14,
+        },
+        confirmButton: {
+          paddingHorizontal: 12,
+          paddingVertical: 7,
+          borderRadius: 8,
+          backgroundColor: theme.colors.surface2,
+        },
+        confirmButtonText: { color: theme.colors.foregroundMuted, fontSize: 12 },
+        confirmPrimary: { backgroundColor: theme.colors.accent },
+        confirmPrimaryText: { color: theme.colors.accentForeground, fontSize: 12 },
       }),
     [theme, layout.compact, showArchived],
   );
@@ -540,7 +623,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                       onOpenAgent={() => openAgent(agent.id)}
                       onCreateChild={() => setSelected(`create:${agent.id}`)}
                       onStop={() => void handleStop(agent.id)}
-                      onArchive={() => void handleArchive(agent.id)}
+                      onArchive={() => requestArchive(agent.id)}
                     />
                   </View>
                 );
@@ -570,6 +653,43 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
           onCollapse={() => setSelected(null)}
         />
       ) : null}
+
+      <Modal
+        title="确认归档"
+        open={archiveTarget !== null}
+        onOpenChange={(open) => {
+          // 归档请求进行中锁定弹窗;关闭即取消,零副作用
+          if (!open && !archiving) setArchiveTarget(null);
+        }}
+      >
+        <Modal.Content>
+          <Text style={styles.confirmText}>
+            {archiveTarget?.childFinished
+              ? `子 Agent「${archiveTarget?.title ?? ""}」处于待验收状态,确认归档?归档后将从面板移除且不能在此恢复。`
+              : `确认归档「${archiveTarget?.title ?? ""}」?归档后将从面板移除且不能在此恢复。`}
+          </Text>
+          <View style={styles.confirmActions}>
+            <Pressable
+              style={styles.confirmButton}
+              onPress={() => setArchiveTarget(null)}
+              disabled={archiving}
+              accessibilityRole="button"
+              accessibilityLabel="取消归档"
+            >
+              <Text style={styles.confirmButtonText}>取消</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.confirmButton, styles.confirmPrimary]}
+              onPress={() => void confirmArchive()}
+              disabled={archiving}
+              accessibilityRole="button"
+              accessibilityLabel="确认归档"
+            >
+              <Text style={styles.confirmPrimaryText}>{archiving ? "归档中…" : "确认归档"}</Text>
+            </Pressable>
+          </View>
+        </Modal.Content>
+      </Modal>
     </View>
   );
 }

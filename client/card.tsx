@@ -4,6 +4,7 @@ import { useAgent, usePaseo } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { toneOf, type AgentRunStatus, type AgentTone } from "../shared/graph";
+import { archivePolicy } from "../shared/archive-policy";
 import type { StatusColors } from "../shared/settings";
 import { DEFAULT_RUNNING_COLOR } from "../shared/settings";
 import type { AgentNodeMetadata } from "../shared/agent-metadata";
@@ -143,8 +144,16 @@ export const AgentCard = memo(function AgentCard({
   }, [agentId, metaKey]);
 
   const status: AgentRunStatus = meta.status ?? directoryStatus;
-  // 归档不可逆,仅在完全空闲(非归档、无关注事项)时允许
-  const canArchive = !archived && status === "idle" && !meta.requiresAttention;
+  // 归档策略(shared/archive-policy):主Agent仅完全空闲可归档;
+  // 子Agent额外放开"待验收"(须弹窗确认,由面板负责)。父关系未知保守按主Agent。
+  const archive = archivePolicy({
+    archived,
+    status,
+    requiresAttention: meta.requiresAttention,
+    attentionReason: meta.attentionReason,
+    parentAgentId: meta.parentId,
+  });
+  const canArchive = archive.canArchive;
   const tone = toneOf({
     archived,
     status: meta.status ?? directoryStatus,
