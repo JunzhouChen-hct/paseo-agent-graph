@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { usePaseo, useWorkspace } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
@@ -59,17 +59,26 @@ export function CreateAgentPanel({
   // 权限模式:null 加载中,[] 无模式(整行隐藏),"" 表示默认(不传 modeId,不自动选 bypass)
   const [modes, setModes] = useState<PickerRow[] | null>(null);
   const [modeId, setModeId] = useState("");
-  // 速度:undefined 目录加载中,null 当前组合不支持(隐藏),否则为 descriptor
-  const [speed, setSpeed] = useState<SpeedFeatureDescriptor | null | undefined>(undefined);
-  // 速度选择:"" 未指定,select 为 option id,toggle 为 "on"
+  // 速度 descriptor:最后确认到的能力;null 表示当前组合未确认到速度
+  const [speed, setSpeed] = useState<SpeedFeatureDescriptor | null>(null);
+  // 速度选择:"" 未指定,select 为 option id,toggle 为 on/off
   const [speedSelection, setSpeedSelection] = useState("");
+  // 速度确认状态:pending=目录确认中;error≠null=确认失败(保留已选,阻止提交,可重试)
+  const [speedPending, setSpeedPending] = useState(false);
+  const [speedError, setSpeedError] = useState<string | null>(null);
+  // 速度目录重试计数:自增触发 listFeatures 重新拉取
+  const [speedRetryTick, setSpeedRetryTick] = useState(0);
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // 同步 inflight guard:创建期间锁全部输入,防止 form 卸载重开/连点造成重复创建
+  const creatingRef = useRef(false);
 
+  /** 同步清空 mode/速度选择:provider/model 显式切换时立即调用,不等异步目录 */
   const resetModeAndSpeed = useCallback(() => {
     setModeId("");
-    setSpeed(undefined);
+    setSpeed(null);
     setSpeedSelection("");
+    setSpeedError(null);
   }, []);
 
   // mount 时拉取可用提供方,默认选父 agent 的 provider(在列表中时)
@@ -182,16 +191,20 @@ export function CreateAgentPanel({
   }, [currentModel]);
 
   // provider/model/mode/思考强度变化 → 拉真实特性目录(listFeatures 需 provider/model 组合串与 cwd);
-  // 只挑速度 descriptor,未知/不支持时保持 null(整行隐藏且不传 featureValues)。
-  // 已选速度在这里不清空:provider/model 切换由各自 effect 清除,mode/思考变化后若仍受支持则保留。
+  // 只挑速度 descriptor。已选速度在确认期间保留;确认失败不算"无能力",保留选择并阻止提交。
+  // 新请求发出时旧响应由 cancelled 丢弃,descriptor/选择只归属当前目录组合。
   useEffect(() => {
     let cancelled = false;
-    setSpeed(undefined);
     if (!providerId || !modelId || !cwd) {
+      // 组合不完整:没有可归属的速度目录,清空 descriptor 与选择
       setSpeed(null);
       setSpeedSelection("");
+      setSpeedPending(false);
+      setSpeedError(null);
       return;
     }
+    setSpeedPending(true);
+    setSpeedError(null);
     paseo.providers
       .listFeatures({
         provider: `${providerId}/${modelId}`,
@@ -203,25 +216,33 @@ export function CreateAgentPanel({
         if (cancelled) return;
         const found = pickSpeedFeature(result.features ?? []);
         setSpeed(found);
-        // 目录刷新后已选项不再受支持时清除,避免把非法值带进创建请求
+        setSpeedPending(false);
+        // 权威目录结果:已选项不再受支持时清除,受支持则保留
         setSpeedSelection((prev) => (found && speedSelectionValid(found, prev) ? prev : ""));
       })
-      .catch(() => {
-        if (!cancelled) setSpeed(null);
+      .catch((err) => {
+        if (cancelled) return;
+        // 拉取失败 ≠ 无能力:descriptor 与已选速度保留,标记错误,提交被阻止直到重试成功或用户重置
+        setSpeedPending(false);
+        setSpeedError(err instanceof Error ? err.message : "速度特性目录拉取失败");
       });
     return () => {
       cancelled = true;
     };
-  }, [paseo, providerId, modelId, modeId, thinkingId, cwd]);
+  }, [paseo, providerId, modelId, modeId, thinkingId, cwd, speedRetryTick]);
 
-  // 速度选择 → featureValues(仅显式选择时传;descriptor 未就绪/不支持时不传)
+  // 已选速度未确认(确认中/确认失败)期间阻止创建,避免静默丢 featureValues
+  const speedBlocked = speedSelection !== "" && (speedPending || speedError !== null);
+
+  // 速度选择 → featureValues(仅显式选择且 descriptor 已确认时组装)
   const speedValues = useMemo(
     () => (speed && speedSelection ? speedFeatureValuesForSelection(speed, speedSelection) : null),
     [speed, speedSelection],
   );
 
   const handleCreate = useCallback(async () => {
-    if (!providerId || !modelId || creating) return;
+    if (!providerId || !modelId || creatingRef.current || speedBlocked) return;
+    creatingRef.current = true;
     setCreating(true);
     try {
       const handle = await paseo.workspaces.ref(workspaceId).agents.create({
@@ -241,6 +262,7 @@ export function CreateAgentPanel({
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "创建失败");
     } finally {
+      creatingRef.current = false;
       setCreating(false);
     }
   }, [
@@ -251,10 +273,10 @@ export function CreateAgentPanel({
     thinkingId,
     modeId,
     speedValues,
+    speedBlocked,
     parentAgentId,
     title,
     prompt,
-    creating,
     toast,
     onDone,
   ]);
@@ -324,6 +346,15 @@ export function CreateAgentPanel({
         },
         optionText: { flex: 1, color: theme.colors.foreground, fontSize: 12 },
         optionTextActive: { fontWeight: "700" },
+        blockText: { color: theme.colors.statusWarning, fontSize: 11, lineHeight: 15 },
+        retryButton: {
+          alignSelf: "flex-start",
+          paddingHorizontal: 10,
+          paddingVertical: 5,
+          borderRadius: 8,
+          backgroundColor: theme.colors.surface2,
+        },
+        retryButtonText: { color: theme.colors.foreground, fontSize: 11 },
         buttons: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 4 },
         createButton: {
           flex: 1,
@@ -345,7 +376,7 @@ export function CreateAgentPanel({
     [theme, compact],
   );
 
-  // 下拉字段:点行展开(单开),点选项收起;选项列表限高滚动
+  // 下拉字段:点行展开(单开),点选项收起;选项列表限高滚动;创建期间整体锁定
   const renderPicker = (
     key: string,
     label: string,
@@ -361,7 +392,7 @@ export function CreateAgentPanel({
         <Pressable
           style={styles.pickerTrigger}
           onPress={() => setOpenKey(open ? null : key)}
-          disabled={!rows || rows.length === 0}
+          disabled={creating || !rows || rows.length === 0}
           accessibilityLabel={`选择${label}`}
         >
           <Text
@@ -403,6 +434,20 @@ export function CreateAgentPanel({
     );
   };
 
+  // 速度行选项:select 列出真实 options,toggle 为 默认/开启/关闭 三态(false 是显式值)
+  const speedRows: PickerRow[] | null = speed
+    ? speed.type === "toggle"
+      ? [
+          { id: "", label: "默认(不指定)" },
+          { id: "on", label: "开启" },
+          { id: "off", label: "关闭" },
+        ]
+      : [
+          { id: "", label: "默认(不指定)" },
+          ...(speed.options ?? []).map((option) => ({ id: option.id, label: option.label })),
+        ]
+    : null;
+
   return (
     <View style={styles.root}>
       <View style={styles.header}>
@@ -415,6 +460,7 @@ export function CreateAgentPanel({
           style={styles.input}
           value={title}
           onChangeText={setTitle}
+          editable={!creating}
           placeholder="留空自动生成"
           placeholderTextColor={theme.colors.foregroundMuted}
         />
@@ -424,7 +470,15 @@ export function CreateAgentPanel({
         "提供方",
         providers,
         providerId,
-        (id) => setProviderId(id),
+        (id) => {
+          if (id === providerId) return;
+          // 显式切 provider:同步清空旧 model/mode/速度,杜绝 providerB+modelA 混搭提交
+          setProviderId(id);
+          setModels(null);
+          setModelId(null);
+          setThinkingId("");
+          resetModeAndSpeed();
+        },
       )}
       {renderPicker(
         "model",
@@ -454,25 +508,34 @@ export function CreateAgentPanel({
         ? renderPicker(
             "speed",
             speed.label || "速度",
-            speed.type === "toggle"
-              ? [
-                  { id: "", label: "默认(不指定)" },
-                  { id: "on", label: "开启" },
-                ]
-              : [
-                  { id: "", label: "默认(不指定)" },
-                  ...(speed.options ?? []).map((option) => ({ id: option.id, label: option.label })),
-                ],
+            speedRows,
             speedSelection,
             (id) => setSpeedSelection(id),
           )
         : null}
+      {speedBlocked ? (
+        <Text style={styles.blockText}>
+          {speedPending
+            ? "速度特性确认中,已选速度将保留;确认完成前暂不能创建"
+            : `速度特性目录拉取失败(${speedError ?? "未知错误"});已选速度已保留,可重试,或改选"默认(不指定)"后创建`}
+        </Text>
+      ) : null}
+      {speedError && speedSelection !== "" ? (
+        <Pressable
+          style={styles.retryButton}
+          onPress={() => setSpeedRetryTick((tick) => tick + 1)}
+          accessibilityLabel="重试速度确认"
+        >
+          <Text style={styles.retryButtonText}>重试速度确认</Text>
+        </Pressable>
+      ) : null}
       <View>
         <Text style={styles.fieldLabel}>首条消息</Text>
         <TextInput
           style={styles.promptInput}
           value={prompt}
           onChangeText={setPrompt}
+          editable={!creating}
           multiline
           placeholder="留空则创建后手动发送"
           placeholderTextColor={theme.colors.foregroundMuted}
@@ -482,13 +545,18 @@ export function CreateAgentPanel({
         <Pressable
           style={styles.createButton}
           onPress={() => void handleCreate()}
-          disabled={creating || !providerId || !modelId}
+          disabled={creating || speedBlocked || !providerId || !modelId}
           accessibilityLabel="创建子代理"
         >
           <Text style={styles.createButtonText}>{creating ? "创建中…" : "创建子代理"}</Text>
         </Pressable>
-        <Pressable style={styles.cancelButton} onPress={onCancel} accessibilityLabel="取消新建">
-          <Text style={styles.cancelButtonText}>取消</Text>
+        <Pressable
+          style={styles.cancelButton}
+          onPress={onCancel}
+          disabled={creating}
+          accessibilityLabel="取消新建"
+        >
+          <Text style={styles.cancelButtonText}>{creating ? "创建中…" : "取消"}</Text>
         </Pressable>
       </View>
     </View>

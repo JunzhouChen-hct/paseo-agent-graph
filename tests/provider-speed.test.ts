@@ -69,6 +69,8 @@ test("speedFeatureValuesForSelection:select 按 option id 组装,toggle 只支�
 
   const toggle = pickSpeedFeature([{ type: "toggle", id: "priority_speed", label: "Speed" }])!;
   assert.deepEqual(speedFeatureValuesForSelection(toggle, "on"), { priority_speed: true });
+  // off 是显式关闭,false 不是默认
+  assert.deepEqual(speedFeatureValuesForSelection(toggle, "off"), { priority_speed: false });
   assert.equal(speedFeatureValuesForSelection(toggle, "priority"), null);
   assert.equal(speedFeatureValuesForSelection(toggle, null), null);
 });
@@ -82,11 +84,13 @@ test("explicitSpeedSelection:只采集显式生效值,默认/未选不采集", (
   // value 不在选项内不采集
   const bogus = pickSpeedFeature([{ ...CODEX_SPEED, value: "ghost" }])!;
   assert.equal(explicitSpeedSelection(bogus), null);
-  // toggle true 采集,false/缺省不采集
+  // toggle true/false 都是显式值,一律采集;缺失布尔值视为默认不采集
   const on = pickSpeedFeature([{ type: "toggle", id: "priority_speed", label: "Speed", value: true }])!;
   assert.deepEqual(explicitSpeedSelection(on), { id: "priority_speed", value: true });
   const off = pickSpeedFeature([{ type: "toggle", id: "priority_speed", label: "Speed", value: false }])!;
-  assert.equal(explicitSpeedSelection(off), null);
+  assert.deepEqual(explicitSpeedSelection(off), { id: "priority_speed", value: false });
+  const absent = pickSpeedFeature([{ type: "toggle", id: "priority_speed", label: "Speed" }])!;
+  assert.equal(explicitSpeedSelection(absent), null);
 });
 
 test("speedSelectionValid:已选项在新目录仍受支持时保留", () => {
@@ -97,5 +101,6 @@ test("speedSelectionValid:已选项在新目录仍受支持时保留", () => {
   assert.equal(speedSelectionValid(feature, "turbo"), false);
   const toggle = pickSpeedFeature([{ type: "toggle", id: "priority_speed", label: "Speed" }])!;
   assert.equal(speedSelectionValid(toggle, "on"), true);
-  assert.equal(speedSelectionValid(toggle, "off"), false);
+  assert.equal(speedSelectionValid(toggle, "off"), true);
+  assert.equal(speedSelectionValid(toggle, "default"), false);
 });

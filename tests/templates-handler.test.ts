@@ -19,6 +19,8 @@ function makePaseo(opts: {
   features?: Record<string, unknown[]>;
   /** 设置后 listFeatures 抛错,消息即该值 */
   failFeatures?: string;
+  /** 设置后 listModes 抛错,消息即该值 */
+  failModes?: string;
   /** 返回错误消息则该次 create 抛错 */
   failCreateAt?: (input: Record<string, unknown>, index: number) => string | null;
 }) {
@@ -60,7 +62,10 @@ function makePaseo(opts: {
         return { providers: opts.available };
       },
       listModels: async (provider: string) => ({ models: opts.models?.[provider] ?? [] }),
-      listModes: async (provider: string) => ({ modes: opts.modes?.[provider] ?? [] }),
+      listModes: async (provider: string) => {
+        if (opts.failModes) throw new Error(opts.failModes);
+        return { modes: opts.modes?.[provider] ?? [] };
+      },
       listFeatures: async (draft: { provider: string; cwd: string }) => {
         if (opts.failFeatures) throw new Error(opts.failFeatures);
         return { features: opts.features?.[draft.provider] ?? [] };
@@ -427,6 +432,64 @@ test("handler 建树:有效 modeId → config.modeId 传入;速度 toggle → fe
   const config = mock.createCalls[0].config as Record<string, unknown>;
   assert.equal(config.modeId, "acceptEdits");
   assert.deepEqual(config.featureValues, { priority_speed: true });
+});
+
+test("handler 建树:速度 toggle 显式关闭(false)→ featureValues 保留 false", async () => {
+  const mock = makePaseo({
+    workspace: SPEED_WORKSPACE,
+    ...OK_PROBE,
+    features: { "codex/gpt-5.5": [{ type: "toggle", id: "priority_speed", label: "Speed", value: true }] },
+  });
+  const result = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "",
+      runId: "r1",
+      nodes: [
+        node({ key: "root", speedFeatureId: "priority_speed", speedFeatureValue: false }),
+      ],
+    } as never,
+    mock,
+  );
+  assert.equal(result.ok, true);
+  const config = mock.createCalls[0].config as Record<string, unknown>;
+  assert.deepEqual(config.featureValues, { priority_speed: false });
+});
+
+test("handler 建树:modeId 预检 fail-closed(目录空/拉取失败/未知模式)→ 均零创建", async () => {
+  const input = (
+    modeId: string,
+  ) => ({
+    workspaceId: "ws1",
+    title: "任务",
+    prompt: "",
+    runId: "r1",
+    nodes: [node({ key: "root", modeId })],
+  });
+  const base = {
+    workspace: { id: "ws1", title: "WS" },
+    available: [{ provider: "codex", available: true }],
+    models: { codex: [{ id: "gpt-5.5" }] },
+  };
+  // 模式目录成功但为空 []:显式 modeId 无法确认 → 拒绝
+  const emptyDir = makePaseo({ ...base, modes: { codex: [] } });
+  const r1 = await handleCreateTaskFromTemplate(input("acceptEdits") as never, emptyDir);
+  assert.equal(r1.ok, false);
+  assert.equal(emptyDir.createCalls.length, 0);
+  assert.ok(r1.validationErrors.some((e) => e.includes("模式目录为空")));
+  // 模式目录拉取失败 → 拒绝
+  const failed = makePaseo({ ...base, failModes: "boom" });
+  const r2 = await handleCreateTaskFromTemplate(input("acceptEdits") as never, failed);
+  assert.equal(r2.ok, false);
+  assert.equal(failed.createCalls.length, 0);
+  assert.ok(r2.validationErrors.some((e) => e.includes("模式目录拉取失败")));
+  // 未知模式 → 拒绝
+  const unknown = makePaseo({ ...base, modes: { codex: [{ id: "default" }] } });
+  const r3 = await handleCreateTaskFromTemplate(input("acceptEdits") as never, unknown);
+  assert.equal(r3.ok, false);
+  assert.equal(unknown.createCalls.length, 0);
+  assert.ok(r3.validationErrors.some((e) => e.includes("acceptEdits")));
 });
 
 test("handler 建树:速度选项非法/目录为空/拉取失败/缺 cwd → 均拒绝且零创建", async () => {

@@ -85,7 +85,10 @@ export function speedFeatureValuesForSelection(
 ): Record<string, unknown> | null {
   if (!selection) return null;
   if (feature.type === "toggle") {
-    return selection === "on" ? { [feature.id]: true } : null;
+    // 开关三态:on=显式开启,off=显式关闭(false 是有效显式值,不是默认)
+    if (selection === "on") return { [feature.id]: true };
+    if (selection === "off") return { [feature.id]: false };
+    return null;
   }
   const hit = (feature.options ?? []).some((option) => option.id === selection);
   return hit ? { [feature.id]: selection } : null;
@@ -93,13 +96,14 @@ export function speedFeatureValuesForSelection(
 
 /**
  * 从 descriptor 当前生效值提取"可复制的显式选择"(模板导入采集用):
- * select 取已选 option 且需在选项内;toggle 仅 value === true 时保留(等效默认的不存)。
+ * select 取已选 option 且需在选项内;toggle 的 true/false 都是显式值,一律保留
+ * (仅 descriptor 未给出布尔值时视为默认不采集)。
  */
 export function explicitSpeedSelection(
   feature: SpeedFeatureDescriptor,
 ): { id: string; value: string | boolean } | null {
   if (feature.type === "toggle") {
-    return feature.value === true ? { id: feature.id, value: true } : null;
+    return typeof feature.value === "boolean" ? { id: feature.id, value: feature.value } : null;
   }
   const value = feature.value;
   if (typeof value !== "string" || !value) return null;
@@ -110,6 +114,6 @@ export function explicitSpeedSelection(
 /** 选择值是否仍被 descriptor 支持(refetch 后保住用户已选项;"" 表示未选择,恒合法) */
 export function speedSelectionValid(feature: SpeedFeatureDescriptor, selection: string | null): boolean {
   if (!selection) return true;
-  if (feature.type === "toggle") return selection === "on";
+  if (feature.type === "toggle") return selection === "on" || selection === "off";
   return (feature.options ?? []).some((option) => option.id === selection);
 }

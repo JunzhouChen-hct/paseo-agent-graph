@@ -146,7 +146,12 @@ export async function prevalidateConfigs(
         }
         modesCache.set(node.provider, modes);
       }
-      if (modes && modes.length > 0 && !modes.includes(node.modeId)) {
+      if (modes && modes.length === 0) {
+        // 目录为空 ≠ 放行:显式 modeId 无法被确认支持,与 model/速度预检口径一致
+        errors.push(`${label}:提供方 ${node.provider} 模式目录为空,不支持 ${node.modeId}`);
+        continue;
+      }
+      if (modes && !modes.includes(node.modeId)) {
         errors.push(`${label}:模式 ${node.modeId} 不在提供方 ${node.provider} 的可用模式中`);
       }
     }
@@ -173,8 +178,9 @@ export async function prevalidateConfigs(
       }
       const value = node.speedFeatureValue;
       if (feature.type === "toggle") {
-        if (value !== true) {
-          errors.push(`${label}:速度 ${feature.label} 为开关形态,取值只支持开启(true)`);
+        // 开关三态:true/false 都是显式值;非布尔取值(如误存 option id)拒绝
+        if (typeof value !== "boolean") {
+          errors.push(`${label}:速度 ${feature.label} 为开关形态,取值只支持布尔(true/false)`);
         }
         continue;
       }

@@ -346,7 +346,10 @@ function NodeConfigPickers({
   // 节点已保存的速度选择 → UI 选择串(仅 descriptor 确认为同一 id 时可展示)
   const speedCurrentSelection = useMemo<string>(() => {
     if (!node.speedFeatureId || !speed || speed.id !== node.speedFeatureId) return "";
-    if (speed.type === "toggle") return node.speedFeatureValue === true ? "on" : "";
+    if (speed.type === "toggle") {
+      // false 是显式关闭,不是默认
+      return node.speedFeatureValue === true ? "on" : node.speedFeatureValue === false ? "off" : "";
+    }
     return typeof node.speedFeatureValue === "string" ? node.speedFeatureValue : "";
   }, [node.speedFeatureId, node.speedFeatureValue, speed]);
 
@@ -356,6 +359,7 @@ function NodeConfigPickers({
       ? [
           { id: "", label: "默认(不指定)" },
           { id: "on", label: "开启" },
+          { id: "off", label: "关闭" },
         ]
       : [
           { id: "", label: "默认(不指定)" },
@@ -473,12 +477,12 @@ function NodeConfigPickers({
           }
           theme={theme}
           onPick={(id) =>
-            // ""=不指定;toggle "on"=true;select 为 option id
+            // ""=不指定;toggle on/off=显式 true/false(false 同样保留);select 为 option id
             onPatch(
               id
                 ? {
                     speedFeatureId: speed.id,
-                    speedFeatureValue: speed.type === "toggle" ? true : id,
+                    speedFeatureValue: speed.type === "toggle" ? id === "on" : id,
                   }
                 : { speedFeatureId: undefined, speedFeatureValue: undefined },
             )

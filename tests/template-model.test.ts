@@ -249,6 +249,8 @@ test("导入:从快照 features 采集显式速度,默认/不支持不采集", (
       // 无 features / 只有权限类 descriptor → 不采集
       snap({ id: "c", createdAt: "3", features: [{ type: "toggle", id: "auto_accept", label: "Auto accept", value: true }] }),
       snap({ id: "d", createdAt: "4" }),
+      // toggle 显式关闭 false → 同样采集,不当默认丢弃
+      snap({ id: "e", createdAt: "5", features: [{ type: "toggle", id: "priority_speed", label: "Speed", value: false }] }),
     ],
     { suggestedName: "草稿" },
   );
@@ -256,6 +258,11 @@ test("导入:从快照 features 采集显式速度,默认/不支持不采集", (
   assert.deepEqual(
     { id: a?.speedFeatureId, value: a?.speedFeatureValue },
     { id: "service_tier", value: "priority" },
+  );
+  const e = result.nodes.find((n) => n.title === "e");
+  assert.deepEqual(
+    { id: e?.speedFeatureId, value: e?.speedFeatureValue },
+    { id: "priority_speed", value: false },
   );
   for (const key of ["b", "c", "d"]) {
     const target = result.nodes.find((n) => n.title === key);
