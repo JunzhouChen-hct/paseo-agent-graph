@@ -18,6 +18,7 @@ import {
 import { useProjectAgentDirectory, type DirectoryAgent } from "./directory";
 import { computeLayout, type LayoutResult } from "./layout";
 import { AgentCard, type CardMeta } from "./card";
+import { FeedbackPressable } from "./feedback-pressable";
 import { GraphEdgeFlow, GraphEdgeLine } from "./edge";
 import { assignExitOffsets, type Point, type SampledPath } from "../shared/edge-geometry";
 import { planEdgePath, routeBounds, type ObstacleRect } from "../shared/edge-routing";
@@ -443,6 +444,8 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
           borderRadius: 8,
           backgroundColor: theme.colors.surface2,
         },
+        // 顶栏/弹窗按钮统一的悬停/按下反馈:透明度下压,对静态/选中/主色底都成立
+        buttonHover: { opacity: 0.8 },
         confirmButtonText: { color: theme.colors.foregroundMuted, fontSize: 12 },
         confirmPrimary: { backgroundColor: theme.colors.accent },
         confirmPrimaryText: { color: theme.colors.accentForeground, fontSize: 12 },
@@ -494,24 +497,26 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
           <Text style={styles.chipText}>归档 {stats.archived}</Text>
         </View>
         <View style={styles.spacer} />
-        <Pressable
+        <FeedbackPressable
           style={styles.archivedToggle}
+          hoverStyle={styles.buttonHover}
           onPress={() => setView("templates")}
           accessibilityRole="button"
           accessibilityLabel="打开节点模板"
         >
           <Icon name="LayoutTemplate" size={12} color={theme.colors.foregroundMuted} />
           <Text style={styles.archivedToggleText}>节点模板</Text>
-        </Pressable>
-        <Pressable
+        </FeedbackPressable>
+        <FeedbackPressable
           style={styles.archivedToggle}
+          hoverStyle={styles.buttonHover}
           onPress={() => setArchivedOverride(!showArchived)}
           accessibilityRole="switch"
           accessibilityState={{ checked: showArchived }}
         >
           <Icon name={showArchived ? "Eye" : "EyeOff"} size={12} color={theme.colors.foregroundMuted} />
           <Text style={styles.archivedToggleText}>已归档</Text>
-        </Pressable>
+        </FeedbackPressable>
         {projectName ? (
           <Text style={styles.scopeHint}>
             项目总览:展示项目内全部工作区的 agent;节点模板与导入仍只针对当前工作区。
@@ -522,14 +527,15 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       {error ? (
         <View style={styles.placeholder}>
           <Text style={styles.placeholderText}>订阅 agent 目录失败:{error}</Text>
-          <Pressable
+          <FeedbackPressable
             style={styles.retryButton}
+            hoverStyle={styles.buttonHover}
             onPress={retry}
             accessibilityRole="button"
             accessibilityLabel="重试订阅"
           >
             <Text style={styles.retryText}>重试</Text>
-          </Pressable>
+          </FeedbackPressable>
         </View>
       ) : !ready ? (
         <View style={styles.placeholder}>
@@ -557,8 +563,10 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                 { width: Math.max(canvasWidth, 1), height: Math.max(canvasHeight, 1) },
               ]}
             >
+              {/* 画布空白层:点击清空选中;光标显式 auto(默认箭头,RN CursorValue 无
+                  "default",auto 即未指定时的浏览器默认),避免 Pressable 让全面板继承 pointer */}
               <Pressable
-                style={StyleSheet.absoluteFill}
+                style={[StyleSheet.absoluteFill, { cursor: "auto" }]}
                 onPress={() => setSelected(null)}
                 accessibilityLabel="取消选中"
               />
@@ -679,24 +687,26 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
               : `确认归档「${archiveTarget?.title ?? ""}」?归档后将从面板移除且不能在此恢复。`}
           </Text>
           <View style={styles.confirmActions}>
-            <Pressable
+            <FeedbackPressable
               style={styles.confirmButton}
+              hoverStyle={styles.buttonHover}
               onPress={cancelArchive}
               disabled={archiving}
               accessibilityRole="button"
               accessibilityLabel="取消归档"
             >
               <Text style={styles.confirmButtonText}>取消</Text>
-            </Pressable>
-            <Pressable
+            </FeedbackPressable>
+            <FeedbackPressable
               style={[styles.confirmButton, styles.confirmPrimary]}
+              hoverStyle={styles.buttonHover}
               onPress={() => void confirmArchive()}
               disabled={archiving}
               accessibilityRole="button"
               accessibilityLabel="确认归档"
             >
               <Text style={styles.confirmPrimaryText}>{archiving ? "归档中…" : "确认归档"}</Text>
-            </Pressable>
+            </FeedbackPressable>
           </View>
         </Modal.Content>
       </Modal>

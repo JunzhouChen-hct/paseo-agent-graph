@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { usePaseo, useRpc, useSettings, useWorkspace } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
+import { FeedbackPressable } from "./feedback-pressable";
 import {
   pickSpeedFeature,
   speedSelectionValid,
@@ -112,6 +113,8 @@ function PickerField({
     () =>
       StyleSheet.create({
         label: { color: theme.colors.foregroundMuted, fontSize: 10, fontWeight: "600", marginBottom: 3 },
+        // 悬停/按下统一反馈:透明度下压,对各类底色成立
+        buttonHover: { opacity: 0.8 },
         trigger: {
           flexDirection: "row",
           alignItems: "center",
@@ -159,8 +162,9 @@ function PickerField({
   return (
     <View>
       <Text style={styles.label}>{label}</Text>
-      <Pressable
+      <FeedbackPressable
         style={styles.trigger}
+        hoverStyle={styles.buttonHover}
         onPress={() => setOpen(!open)}
         disabled={disabled || !rows || rows.length === 0}
         accessibilityLabel={`选择${label}`}
@@ -172,16 +176,17 @@ function PickerField({
           {display.label}
         </Text>
         <Icon name="ChevronDown" size={13} color={theme.colors.foregroundMuted} />
-      </Pressable>
+      </FeedbackPressable>
       {open && rows && rows.length > 0 ? (
         <View style={styles.list}>
           <ScrollView style={styles.scroll}>
             {rows.map((row) => {
               const active = row.id === currentId;
               return (
-                <Pressable
+                <FeedbackPressable
                   key={row.id}
                   style={styles.row}
+                  hoverStyle={styles.buttonHover}
                   onPress={() => {
                     setOpen(false);
                     onPick(row.id);
@@ -191,7 +196,7 @@ function PickerField({
                     {row.label}
                   </Text>
                   {active ? <Icon name="Check" size={14} color={theme.colors.accent} /> : null}
-                </Pressable>
+                </FeedbackPressable>
               );
             })}
           </ScrollView>
@@ -697,6 +702,7 @@ function TemplateEditor({
           borderColor: theme.colors.border,
         },
         addButtonText: { color: theme.colors.foregroundMuted, fontSize: 12 },
+        buttonHover: { opacity: 0.8 },
         footerButtons: { flexDirection: "row", gap: 8, marginTop: 4 },
         primaryButton: {
           flex: 1,
@@ -723,9 +729,9 @@ function TemplateEditor({
       <ScrollView style={styles.scroll} contentContainerStyle={styles.body}>
         <View style={styles.headerRow}>
           <Text style={styles.headerTitle}>编辑模板</Text>
-          <Pressable style={styles.iconButton} onPress={onCancel} accessibilityLabel="放弃编辑模板">
+          <FeedbackPressable style={styles.iconButton} hoverStyle={styles.buttonHover} onPress={onCancel} accessibilityLabel="放弃编辑模板">
             <Text style={styles.iconButtonText}>取消</Text>
-          </Pressable>
+          </FeedbackPressable>
         </View>
 
         {editor.notes.length > 0 ? (
@@ -765,8 +771,9 @@ function TemplateEditor({
                 {isRoot ? (
                   <Text style={styles.noteText}>主节点不可删除</Text>
                 ) : (
-                  <Pressable
+                  <FeedbackPressable
                     style={[styles.removeButton, hasChildren ? { opacity: 0.4 } : null]}
+                    hoverStyle={styles.buttonHover}
                     onPress={() => removeNode(node.key)}
                     disabled={hasChildren}
                     accessibilityLabel={`删除节点 ${node.key}`}
@@ -774,7 +781,7 @@ function TemplateEditor({
                     <Text style={styles.removeButtonText}>
                       {hasChildren ? "先移除子节点" : "删除"}
                     </Text>
-                  </Pressable>
+                  </FeedbackPressable>
                 )}
               </View>
               <View>
@@ -813,9 +820,9 @@ function TemplateEditor({
         })}
 
         {nodes.length < TEMPLATE_MAX_NODES ? (
-          <Pressable style={styles.addButton} onPress={addNode} accessibilityLabel="添加节点">
+          <FeedbackPressable style={styles.addButton} hoverStyle={styles.buttonHover} onPress={addNode} accessibilityLabel="添加节点">
             <Text style={styles.addButtonText}>+ 添加节点(最多 {TEMPLATE_MAX_NODES} 个)</Text>
-          </Pressable>
+          </FeedbackPressable>
         ) : null}
 
         {allErrors.map((error, index) => (
@@ -830,26 +837,28 @@ function TemplateEditor({
             <Text style={styles.conflictText}>
               可以显式载入最新文档并保留当前草稿:其他模板与默认设置取最新版本,本模板将以你当前的草稿内容覆盖其最新版本。
             </Text>
-            <Pressable
+            <FeedbackPressable
               style={styles.secondaryButton}
+              hoverStyle={styles.buttonHover}
               onPress={() => void handleMergeLatestAndSave()}
               disabled={!canSave}
               accessibilityLabel="载入最新版本并保留我的草稿"
             >
               <Text style={styles.secondaryButtonText}>载入最新并保留我的草稿</Text>
-            </Pressable>
+            </FeedbackPressable>
           </View>
         ) : null}
 
         <View style={styles.footerButtons}>
-          <Pressable
+          <FeedbackPressable
             style={[styles.primaryButton, !canSave ? { opacity: 0.5 } : null]}
+            hoverStyle={styles.buttonHover}
             onPress={() => void handleSave()}
             disabled={!canSave}
             accessibilityLabel="保存模板"
           >
             <Text style={styles.primaryButtonText}>{saving ? "保存中…" : "保存模板"}</Text>
-          </Pressable>
+          </FeedbackPressable>
         </View>
       </ScrollView>
     </View>
@@ -1020,6 +1029,7 @@ function TaskLauncher({
         },
         secondaryButtonText: { color: theme.colors.foregroundMuted, fontSize: 12 },
         disabled: { opacity: 0.4 },
+        buttonHover: { opacity: 0.8 },
       }),
     [theme, compact],
   );
@@ -1031,14 +1041,15 @@ function TaskLauncher({
       <ScrollView style={styles.scroll} contentContainerStyle={styles.body}>
         <View style={styles.headerRow}>
           <Text style={styles.headerTitle}>按模板新建任务</Text>
-          <Pressable
+          <FeedbackPressable
             style={[styles.iconButton, running ? styles.disabled : null]}
+            hoverStyle={styles.buttonHover}
             onPress={onBack}
             disabled={running}
             accessibilityLabel="返回模板列表"
           >
             <Text style={styles.iconButtonText}>返回</Text>
-          </Pressable>
+          </FeedbackPressable>
         </View>
 
         <PickerField
@@ -1107,13 +1118,14 @@ function TaskLauncher({
             <Text style={styles.successText}>
               已创建 {state.createdCount} 个节点,主节点 {state.rootAgentId}
             </Text>
-            <Pressable
+            <FeedbackPressable
               style={styles.secondaryButton}
+              hoverStyle={styles.buttonHover}
               onPress={() => onOpenAgent(state.rootAgentId)}
               accessibilityLabel="打开主节点"
             >
               <Text style={styles.secondaryButtonText}>打开主节点</Text>
-            </Pressable>
+            </FeedbackPressable>
           </>
         ) : null}
         {state.kind === "failed" ? (
@@ -1144,8 +1156,9 @@ function TaskLauncher({
         ) : null}
 
         <View style={styles.footerButtons}>
-          <Pressable
+          <FeedbackPressable
             style={[styles.primaryButton, !canLaunch ? styles.disabled : null]}
+            hoverStyle={styles.buttonHover}
             onPress={() =>
               void handleLaunch(state.kind === "failed" ? state.attempt : undefined)
             }
@@ -1155,7 +1168,7 @@ function TaskLauncher({
             <Text style={styles.primaryButtonText}>
               {running ? "创建中…" : state.kind === "failed" ? "重试(复用首次输入与幂等 key)" : "创建任务"}
             </Text>
-          </Pressable>
+          </FeedbackPressable>
         </View>
       </ScrollView>
     </View>
@@ -1347,6 +1360,7 @@ export function TemplatesView({
         placeholder: { padding: 20, alignItems: "center", gap: 6 },
         placeholderText: { color: theme.colors.foregroundMuted, fontSize: 12, textAlign: "center", lineHeight: 17 },
         errorText: { color: theme.colors.statusDanger, fontSize: 12 },
+        buttonHover: { opacity: 0.8 },
       }),
     [theme, compact],
   );
@@ -1388,24 +1402,25 @@ export function TemplatesView({
     <View style={styles.root}>
       <ScrollView style={styles.scroll} contentContainerStyle={styles.body}>
         <View style={styles.headerRow}>
-          <Pressable style={styles.iconButton} onPress={onBack} accessibilityLabel="返回节点图">
+          <FeedbackPressable style={styles.iconButton} hoverStyle={styles.buttonHover} onPress={onBack} accessibilityLabel="返回节点图">
             <Icon name="ArrowLeft" size={12} color={theme.colors.foregroundMuted} />
             <Text style={styles.iconButtonText}>返回</Text>
-          </Pressable>
+          </FeedbackPressable>
           <Text style={styles.headerTitle}>节点模板</Text>
-          <Pressable style={styles.iconButton} onPress={startNewTemplate} accessibilityLabel="新建模板">
+          <FeedbackPressable style={styles.iconButton} hoverStyle={styles.buttonHover} onPress={startNewTemplate} accessibilityLabel="新建模板">
             <Icon name="Plus" size={12} color={theme.colors.foregroundMuted} />
             <Text style={styles.iconButtonText}>新建</Text>
-          </Pressable>
-          <Pressable
+          </FeedbackPressable>
+          <FeedbackPressable
             style={[styles.iconButton, importing ? { opacity: 0.5 } : null]}
+            hoverStyle={styles.buttonHover}
             onPress={() => void startImport()}
             disabled={importing}
             accessibilityLabel="从当前未归档节点生成模板"
           >
             <Icon name="Import" size={12} color={theme.colors.foregroundMuted} />
             <Text style={styles.iconButtonText}>{importing ? "生成中…" : "从当前节点生成"}</Text>
-          </Pressable>
+          </FeedbackPressable>
         </View>
 
         <Text style={styles.defaultHint}>
@@ -1446,15 +1461,17 @@ export function TemplatesView({
                 {template.nodes.find((node) => !node.parentKey)?.model || "?"}
               </Text>
               <View style={styles.actions}>
-                <Pressable
+                <FeedbackPressable
                   style={styles.chip}
+                  hoverStyle={styles.buttonHover}
                   onPress={() => setMode({ kind: "task" })}
                   accessibilityLabel={`按模板 ${template.name} 新建任务`}
                 >
                   <Text style={styles.chipText}>新建任务</Text>
-                </Pressable>
-                <Pressable
+                </FeedbackPressable>
+                <FeedbackPressable
                   style={styles.chip}
+                  hoverStyle={styles.buttonHover}
                   onPress={() => {
                     if (settings.status !== "ready") return;
                     setEditor({
@@ -1468,16 +1485,18 @@ export function TemplatesView({
                   accessibilityLabel={`编辑模板 ${template.name}`}
                 >
                   <Text style={styles.chipText}>编辑</Text>
-                </Pressable>
-                <Pressable
+                </FeedbackPressable>
+                <FeedbackPressable
                   style={styles.chip}
+                  hoverStyle={styles.buttonHover}
                   onPress={() => setDefault(isDefault ? null : template.id)}
                   accessibilityLabel={isDefault ? `关闭 ${template.name} 的项目默认` : `设 ${template.name} 为项目默认`}
                 >
                   <Text style={styles.chipText}>{isDefault ? "关闭默认" : "设为默认"}</Text>
-                </Pressable>
-                <Pressable
+                </FeedbackPressable>
+                <FeedbackPressable
                   style={[styles.chip, confirmDeleteId === template.id ? styles.chipDanger : null]}
+                  hoverStyle={styles.buttonHover}
                   onPress={() => {
                     if (confirmDeleteId === template.id) {
                       if (confirmTimer.current) clearTimeout(confirmTimer.current);
@@ -1493,7 +1512,7 @@ export function TemplatesView({
                   <Text style={confirmDeleteId === template.id ? styles.chipDangerText : styles.chipText}>
                     {confirmDeleteId === template.id ? "确认删除?" : "删除"}
                   </Text>
-                </Pressable>
+                </FeedbackPressable>
               </View>
             </View>
           );

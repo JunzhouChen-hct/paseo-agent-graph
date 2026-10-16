@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { usePaseo, useWorkspace } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
+import { FeedbackPressable } from "./feedback-pressable";
 import {
   pickSpeedFeature,
   speedFeatureValuesForSelection,
@@ -372,6 +373,8 @@ export function CreateAgentPanel({
           alignItems: "center",
         },
         cancelButtonText: { color: theme.colors.foregroundMuted, fontSize: 12 },
+        // 悬停/按下统一反馈:透明度下压,对各类底色成立
+        buttonHover: { opacity: 0.8 },
       }),
     [theme, compact],
   );
@@ -389,8 +392,9 @@ export function CreateAgentPanel({
     return (
       <View key={key}>
         <Text style={styles.fieldLabel}>{label}</Text>
-        <Pressable
+        <FeedbackPressable
           style={styles.pickerTrigger}
+          hoverStyle={styles.buttonHover}
           onPress={() => setOpenKey(open ? null : key)}
           disabled={creating || !rows || rows.length === 0}
           accessibilityLabel={`选择${label}`}
@@ -402,16 +406,17 @@ export function CreateAgentPanel({
             {current?.label ?? "加载中…"}
           </Text>
           <Icon name="ChevronDown" size={13} color={theme.colors.foregroundMuted} />
-        </Pressable>
+        </FeedbackPressable>
         {open && rows && rows.length > 0 ? (
           <View style={styles.optionList}>
             <ScrollView style={styles.optionScroll}>
               {rows.map((row) => {
                 const active = row.id === currentId;
                 return (
-                  <Pressable
+                  <FeedbackPressable
                     key={row.id}
                     style={styles.optionRow}
+                    hoverStyle={styles.buttonHover}
                     onPress={() => {
                       setOpenKey(null);
                       onPick(row.id);
@@ -424,7 +429,7 @@ export function CreateAgentPanel({
                       {row.label}
                     </Text>
                     {active ? <Icon name="Check" size={14} color={theme.colors.accent} /> : null}
-                  </Pressable>
+                  </FeedbackPressable>
                 );
               })}
             </ScrollView>
@@ -521,13 +526,14 @@ export function CreateAgentPanel({
         </Text>
       ) : null}
       {speedError && speedSelection !== "" ? (
-        <Pressable
+        <FeedbackPressable
           style={styles.retryButton}
+          hoverStyle={styles.buttonHover}
           onPress={() => setSpeedRetryTick((tick) => tick + 1)}
           accessibilityLabel="重试速度确认"
         >
           <Text style={styles.retryButtonText}>重试速度确认</Text>
-        </Pressable>
+        </FeedbackPressable>
       ) : null}
       <View>
         <Text style={styles.fieldLabel}>首条消息</Text>
@@ -542,22 +548,24 @@ export function CreateAgentPanel({
         />
       </View>
       <View style={styles.buttons}>
-        <Pressable
+        <FeedbackPressable
           style={styles.createButton}
+          hoverStyle={styles.buttonHover}
           onPress={() => void handleCreate()}
           disabled={creating || speedBlocked || !providerId || !modelId}
           accessibilityLabel="创建子代理"
         >
           <Text style={styles.createButtonText}>{creating ? "创建中…" : "创建子代理"}</Text>
-        </Pressable>
-        <Pressable
+        </FeedbackPressable>
+        <FeedbackPressable
           style={styles.cancelButton}
+          hoverStyle={styles.buttonHover}
           onPress={onCancel}
           disabled={creating}
           accessibilityLabel="取消新建"
         >
           <Text style={styles.cancelButtonText}>{creating ? "创建中…" : "取消"}</Text>
-        </Pressable>
+        </FeedbackPressable>
       </View>
     </View>
   );

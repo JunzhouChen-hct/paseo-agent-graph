@@ -9,6 +9,7 @@ import type { StatusColors } from "../shared/settings";
 import { DEFAULT_RUNNING_COLOR } from "../shared/settings";
 import type { AgentNodeMetadata } from "../shared/agent-metadata";
 import { ContextMeter } from "./context-meter";
+import { FeedbackPressable } from "./feedback-pressable";
 
 export interface CardMeta {
   parentId: string | null;
@@ -240,6 +241,8 @@ export const AgentCard = memo(function AgentCard({
               : theme.colors.border,
           backgroundColor: theme.colors.surface1,
           overflow: "hidden",
+          // 整卡可点击(打开/收起会话),光标 pointer 仅施加在卡片本体上
+          cursor: "pointer",
         },
         // 唯一的呼吸边框:3px 单环,半径按边框宽度内缩保持同心(12-3=9),
         // 内容与本体不动,只有环的透明度呼吸;归档(muted)不挂环
@@ -282,6 +285,8 @@ export const AgentCard = memo(function AgentCard({
         },
         contextText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13, flexShrink: 1 },
         compactText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
+        // 压缩按钮悬停/按下反馈
+        compactHover: { backgroundColor: theme.colors.surface2, borderRadius: 4 },
         wsText: {
           flex: 1,
           color: theme.colors.foregroundMuted,
@@ -301,7 +306,10 @@ export const AgentCard = memo(function AgentCard({
           flex: 1,
           alignItems: "center",
           paddingVertical: 5,
+          borderRadius: 6,
         },
+        // 操作按钮悬停/按下反馈:底色微抬(与卡片 surface1 同系)
+        actionHover: { backgroundColor: theme.colors.surface2 },
         actionDivider: { width: 1, backgroundColor: theme.colors.border },
       }),
     [theme, selected, toneHex, animated],
@@ -406,7 +414,8 @@ export const AgentCard = memo(function AgentCard({
           {/* 归档不可发送压缩;onPress 阻断冒泡,避免触发卡片选中/收起内置会话,
               也不顺带 ack finished 关注;提交期间禁用,连点由 ref guard 同步拦截 */}
           {canCompact ? (
-            <Pressable
+            <FeedbackPressable
+              hoverStyle={styles.compactHover}
               onPress={(event) => {
                 event.stopPropagation();
                 handleCompact();
@@ -417,33 +426,40 @@ export const AgentCard = memo(function AgentCard({
               accessibilityLabel="压缩上下文"
             >
               <Text style={styles.compactText}>{compactPending ? "提交中" : "压缩"}</Text>
-            </Pressable>
+            </FeedbackPressable>
           ) : null}
         </View>
       </View>
       <View style={styles.actions}>
         {!archived ? (
           <>
-            <Pressable style={styles.action} onPress={onCreateChild} accessibilityLabel="新建子代理">
+            <FeedbackPressable style={styles.action} hoverStyle={styles.actionHover} onPress={onCreateChild} accessibilityLabel="新建子代理">
               <Icon name="Plus" size={14} color={theme.colors.foregroundMuted} />
-            </Pressable>
+            </FeedbackPressable>
             <View style={styles.actionDivider} />
           </>
         ) : null}
         {canOpenAgent ? (
           <>
-            <Pressable style={styles.action} onPress={onOpenAgent} accessibilityLabel="打开原 Agent 会话">
+            <FeedbackPressable style={styles.action} hoverStyle={styles.actionHover} onPress={onOpenAgent} accessibilityLabel="打开原 Agent 会话">
               <Icon name="ExternalLink" size={14} color={theme.colors.foregroundMuted} />
-            </Pressable>
+            </FeedbackPressable>
             <View style={styles.actionDivider} />
           </>
         ) : null}
-        <Pressable style={styles.action} onPress={onStop} disabled={tone !== "running"} accessibilityLabel="停止">
-          <Icon name="Square" size={14} color={tone === "running" ? statusColors.running : theme.colors.border} />
-        </Pressable>
-        <View style={styles.actionDivider} />
-        <Pressable
+        <FeedbackPressable
           style={styles.action}
+          hoverStyle={styles.actionHover}
+          onPress={onStop}
+          disabled={tone !== "running"}
+          accessibilityLabel="停止"
+        >
+          <Icon name="Square" size={14} color={tone === "running" ? statusColors.running : theme.colors.border} />
+        </FeedbackPressable>
+        <View style={styles.actionDivider} />
+        <FeedbackPressable
+          style={styles.action}
+          hoverStyle={styles.actionHover}
           onPress={(event) => {
             // 阻断冒泡:避免触发卡片 onPress 打开内置会话——打开会话会 ack 掉
             // finished 关注,可能赶在归档确认之前把待验收清掉
@@ -454,7 +470,7 @@ export const AgentCard = memo(function AgentCard({
           accessibilityLabel="归档"
         >
           <Icon name="Archive" size={14} color={canArchive ? theme.colors.foregroundMuted : theme.colors.border} />
-        </Pressable>
+        </FeedbackPressable>
       </View>
       {/* 呼吸环最后渲染置于内容之上:分割线/内容不会盖住环;pointerEvents none 不拦截点击 */}
       {animated && !archived ? (
