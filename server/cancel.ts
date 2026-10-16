@@ -83,10 +83,11 @@ export async function handleDebugReport({ payload }: RpcInput<typeof debugReport
 }
 
 /** 验收"待验收":先取 daemon 最新快照 fresh 复核,仅 idle + finished 关注才 clear。
- *  daemon 的 clear_agent_attention 本身不区分原因,误调会连 permission/error
- *  一起清掉,因此该检查必须在这里做,不能只信客户端传入时机。
  *  status 必须 idle:真实运行中可携带上一轮的 finished 关注(见 shared/graph.ts
- *  toneOf 特判),此刻回合还在跑,验收会吞掉回合一结束就出现的通知。 */
+ *  toneOf 特判),此刻回合还在跑,验收会吞掉回合一结束就出现的通知。
+ *  已知宿主边界:clear_agent_attention 是无条件通知确认接口(请求仅 agentId),
+ *  fresh 检查与清除非原子,不保证窗口内新到达的 permission/error 通知不被一并
+ *  清除;该竞态无协议内解法,如实记录,不承诺"绝不清其他原因"。 */
 export async function handleAccept({ agentId }: RpcInput<typeof acceptAgentRpc>) {
   try {
     const daemon = await acquireDaemon();
