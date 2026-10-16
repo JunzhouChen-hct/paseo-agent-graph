@@ -220,6 +220,10 @@ export const AgentCard = memo(function AgentCard({
         },
         actions: {
           flexDirection: "row",
+          // 分割线整体内缩 3px(呼吸环线宽):横线两端、竖线下端与环相接但不再叠压,
+          // 底部同时让出环的走线位置,避免操作区分割线盖住呼吸框
+          marginHorizontal: 3,
+          marginBottom: 3,
           borderTopWidth: 1,
           borderTopColor: theme.colors.border,
         },
@@ -269,12 +273,6 @@ export const AgentCard = memo(function AgentCard({
       style={[styles.card, { opacity }]}
       accessibilityRole="button"
     >
-      {animated && !archived ? (
-        <Animated.View
-          pointerEvents="none"
-          style={[styles.pulseRing, { opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1] }) }]}
-        />
-      ) : null}
       <View style={styles.body}>
         <Text style={styles.title} numberOfLines={1}>
           {title}
@@ -335,6 +333,13 @@ export const AgentCard = memo(function AgentCard({
           <Icon name="Archive" size={14} color={canArchive ? theme.colors.foregroundMuted : theme.colors.border} />
         </Pressable>
       </View>
+      {/* 呼吸环最后渲染置于内容之上:分割线/内容不会盖住环;pointerEvents none 不拦截点击 */}
+      {animated && !archived ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[styles.pulseRing, { opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1] }) }]}
+        />
+      ) : null}
     </Pressable>
   );
 });
