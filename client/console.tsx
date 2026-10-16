@@ -274,12 +274,14 @@ export function AgentConsole({
     scrollToEnd();
   }, [items.length, scrollToEnd]);
 
-  // 统一发送入口:普通消息(handleSend)与 /compact 等斜杠命令(handleCompact)共用同一路径。
+  // 统一发送入口:普通消息(handleSend)与 /compact 等斜杠命令(handleCompact)共用此路径。
+  // 返回是否被受理(true=已送达 daemon 或已入本地队列),由调用方决定是否清空草稿。
   // SDK 契约:send resolve 即 daemon 已接受(送达);accepted:false 或错误时 reject。
   // activeTurnBehavior 必须显式传 "steer",缺省时 daemon 会打断当前回合。
   const submitMessage = useCallback(
     async (text: string, messageImages?: ClipboardImage[]) => {
-      if (!text && (!messageImages || messageImages.length === 0)) return;
+      if (!text && (!messageImages || messageImages.length === 0)) return false;
+      const isCommand = text.startsWith("/");
       setSending(true);
       try {
         const mid = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -288,16 +290,27 @@ export function AgentConsole({
             ? messageImages.map((image) => ({ data: image.data, mimeType: image.mimeType }))
             : undefined;
         const running = agentLive?.status === "running";
-        // queue 模式 + 运行中:不调 send,消息连图片攒在本地,回合结束后补发(命令同样排队,不静默丢弃)
+        // 斜杠命令是控制指令:任何模式下都立即送达 daemon,不在客户端 queue 攒着
+        // (queue 模式攒命令会让压缩等到回合结束才执行,且期间无法撤销)
+        if (isCommand) {
+          await paseo.agents.ref(agentId).send(text, {
+            activeTurnBehavior: "steer",
+            messageId: mid,
+            ...(imagesPayload ? { images: imagesPayload } : {}),
+          });
+          // 只报告"已提交",不声称命令已执行完成(压缩由 provider 会话异步完成)
+          toast.show("命令已提交");
+          void reload();
+          return true;
+        }
+        // queue 模式 + 运行中:不调 send,消息连图片攒在本地,回合结束后补发
         if (running && sendBehavior === "queue") {
           setPendingQueue((current) => [
             ...current,
             { mid, text, sent: false, agentId, images: imagesPayload },
           ]);
-          setDraft("");
-          setImages([]);
           toast.show("已排队,回合结束后自动发送");
-          return;
+          return true;
         }
         // 协议限制:activeTurnBehavior 只有 "steer"|"interrupt";queue 是纯客户端编排,不发给 daemon
         const options: {
@@ -307,8 +320,8 @@ export function AgentConsole({
         } = { activeTurnBehavior: "steer", messageId: mid };
         if (imagesPayload) options.images = imagesPayload;
         await paseo.agents.ref(agentId).send(text, options);
-        setDraft("");
-        setImages([]);
+        // 本地已送达记录:queuedIds 只对本地发送过的消息做排队反推,外部消息不误标
+        sentMidsRef.current.add(mid);
         // steer 模式 + 运行中:消息已注入当前回合,留在本地排队展示直到 timeline 摘除
         if (sendBehavior === "steer" && running) {
           setPendingQueue((current) => [
@@ -318,9 +331,11 @@ export function AgentConsole({
         }
         toast.show(sendBehavior === "steer" && running ? "已加入队列(引导当前回合)" : "已发送");
         void reload();
+        return true;
       } catch (err) {
-        // 失败时 draft/图片未清空,可直接重试;排队消息保持 sent:false 由 flush 重试
+        // 失败时草稿由 handleSend 保留,可直接重试;排队消息保持 sent:false 由 flush 重试
         toast.error(err instanceof Error ? err.message : "发送失败");
+        return false;
       } finally {
         setSending(false);
       }
@@ -328,9 +343,18 @@ export function AgentConsole({
     [agentId, agentLive?.status, paseo, reload, sendBehavior, toast],
   );
 
-  const handleSend = useCallback(() => submitMessage(draft.trim(), images), [draft, images, submitMessage]);
+  const handleSend = useCallback(async () => {
+    const text = draft.trim();
+    if (!text && images.length === 0) return;
+    // 只有消息被受理后才清空草稿,失败/按钮路径不丢用户输入
+    if (await submitMessage(text, images)) {
+      setDraft("");
+      setImages([]);
+    }
+  }, [draft, images, submitMessage]);
 
-  // 需求3(context 区域压缩按钮)调用此回调,与手输 /compact 走完全相同的发送/排队路径
+  // 需求3(context 区域压缩按钮)调用此回调,与手输 /compact 走同一命令路径;
+  // 不触碰草稿与已附图片
   const handleCompact = useCallback(() => submitMessage("/compact"), [submitMessage]);
 
   const handleAttach = useCallback(async () => {
@@ -413,7 +437,12 @@ export function AgentConsole({
       if (item.kind === "assistant" || item.kind === "tool" || item.kind === "error" || item.kind === "reasoning") {
         break;
       }
-      if (item.kind === "user" && item.messageId) ids.add(item.messageId);
+      if (item.kind === "user" && item.messageId) {
+        // 只对本地发送成功过的消息做排队反推:斜杠命令立即送达不算排队,
+        // 外部(非本面板)发送的消息末尾无处理痕迹也不误标
+        if (!sentMidsRef.current.has(item.messageId)) continue;
+        ids.add(item.messageId);
+      }
     }
     return ids;
   }, [items, agentLive?.status]);
@@ -427,39 +456,45 @@ export function AgentConsole({
 
   // 回合结束(运行 → 非运行):先把 queue 模式攒下的未发送消息逐条补发,再刷新拉取对话
   const prevStatusRef = useRef(agentLive?.status);
-  const flushingRef = useRef(false);
   const pendingQueueRef = useRef(pendingQueue);
   pendingQueueRef.current = pendingQueue;
+  // 本面板发送成功过的消息 id:queuedIds 排队反推只认这些,命令与外部消息不误标
+  const sentMidsRef = useRef<Set<string>>(new Set());
+  const agentIdRef = useRef(agentId);
+  agentIdRef.current = agentId;
+  const flushingForRef = useRef<string | null>(null);
+  const reflushRef = useRef(false);
 
   // 面板切换 agent 不重挂载(无 key):排队消息与状态边沿必须按 agent 归属重置,
   // 否则 A 会话攒的消息会在 B 会话的回合结束边沿被误发给 B。
   useEffect(() => {
     setPendingQueue([]);
+    sentMidsRef.current = new Set();
     prevStatusRef.current = agentLive?.status;
     // agentId 变化时 agentLive 可能还是旧值,下一轮 status 订阅更新会把 prevStatusRef 校准
   }, [agentId]); // 仅在切换 agent 时重置(故意不依赖 agentLive.status)
 
-  useEffect(() => {
-    const prev = prevStatusRef.current;
-    prevStatusRef.current = agentLive?.status;
-    if (prev !== "running" || agentLive?.status === "running") return;
-
-    const flush = async () => {
-      // 防重入:status 快速抖动时可能多次触发,补发进行中直接跳过(进行中的补发收尾会 reload)
-      if (flushingRef.current) return;
-      flushingRef.current = true;
+  const flushPending = useCallback(
+    async (forAgentId: string) => {
+      // 锁按 agent 记录:别的 agent 的补发进行中不吞掉本次触发,标记收尾后补跑
+      if (flushingForRef.current !== null) {
+        if (flushingForRef.current !== forAgentId) reflushRef.current = true;
+        return;
+      }
+      flushingForRef.current = forAgentId;
       try {
-        // 只补发归属当前 agent 且未发送的消息;每轮重读队列,agent 切换/摘除后残留项静默跳过
+        // 只补发归属目标 agent 且未发送的消息;每轮重读队列,消息被摘除/队列重置后残留项静默跳过
         for (const pending of [...pendingQueueRef.current]) {
-          if (pending.agentId !== agentId || pending.sent) continue;
+          if (pending.agentId !== forAgentId || pending.sent) continue;
           if (!pendingQueueRef.current.some((item) => item.mid === pending.mid)) continue;
           try {
-            await paseo.agents.ref(agentId).send(pending.text, {
+            await paseo.agents.ref(forAgentId).send(pending.text, {
               // daemon 对连续多条 steer 自己排队注入,无需客户端再编排
               activeTurnBehavior: "steer",
               messageId: pending.mid,
               images: pending.images,
             });
+            sentMidsRef.current.add(pending.mid);
             setPendingQueue((current) =>
               current.map((item) => (item.mid === pending.mid ? { ...item, sent: true } : item)),
             );
@@ -469,12 +504,24 @@ export function AgentConsole({
           }
         }
       } finally {
-        flushingRef.current = false;
+        flushingForRef.current = null;
       }
       void reload();
-    };
-    void flush();
-  }, [agentLive?.status, agentId, paseo, toast, reload]);
+      // 补发期间有被跳过的其他 agent 触发:针对当前挂载的 agent 补一轮
+      if (reflushRef.current) {
+        reflushRef.current = false;
+        void flushPending(agentIdRef.current);
+      }
+    },
+    [paseo, toast, reload],
+  );
+
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = agentLive?.status;
+    if (prev !== "running" || agentLive?.status === "running") return;
+    void flushPending(agentId);
+  }, [agentLive?.status, agentId, flushPending]);
 
   const styles = useMemo(
     () =>
