@@ -1,18 +1,28 @@
-import { memo, useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Animated, Easing, Pressable, StyleSheet, Text, View } from "react-native";
-import { useAgent } from "@getpaseo/plugin/client";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { useAgent, usePaseo } from "@getpaseo/plugin/client";
+import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { toneOf, type AgentRunStatus, type AgentTone } from "../shared/graph";
 import type { StatusColors } from "../shared/settings";
 import { DEFAULT_RUNNING_COLOR } from "../shared/settings";
 import type { AgentNodeMetadata } from "../shared/agent-metadata";
+import { ContextMeter } from "./context-meter";
 
 export interface CardMeta {
   parentId: string | null;
   status: AgentRunStatus | null;
   requiresAttention: boolean;
   attentionReason: "finished" | "error" | "permission" | null;
+}
+
+/**
+ * 上下文占用的局部兼容类型(shared/agent-metadata.ts 归 T01 owner,其正式类型
+ * 含同构 context 字段后此交集仍兼容)。undefined/null 均按未知处理,不猜测默认窗口。
+ */
+export interface AgentContextUsage {
+  used: number | null;
+  max: number | null;
 }
 
 export interface AgentCardProps {
@@ -25,7 +35,7 @@ export interface AgentCardProps {
   directoryStatus: AgentRunStatus;
   directoryAttention: boolean;
   /** 节点元数据(思考强度/速度模式/开发分支),面板层批量拉取;无数据为 null。 */
-  metadata: AgentNodeMetadata | null;
+  metadata: (AgentNodeMetadata & { context?: AgentContextUsage | null }) | null;
   /** 该 agent 所属 workspace 的显示标识(项目总览下用于区分跨工作区节点);null 不显示。 */
   workspaceLabel?: string | null;
   selected: boolean;
@@ -75,6 +85,13 @@ function toneColor(tone: AgentTone, theme: PluginTheme, colors: StatusColors): s
     default:
       return theme.colors.foregroundMuted;
   }
+}
+
+/** token 数缩写(k/M),与 console 上下文展示同一口径。 */
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(value);
 }
 
 export const AgentCard = memo(function AgentCard({
@@ -165,6 +182,40 @@ export const AgentCard = memo(function AgentCard({
     return () => loop.stop();
   }, [animated, pulse]);
 
+  const paseo = usePaseo();
+  const toast = useToast();
+  const [compactPending, setCompactPending] = useState(false);
+  // 提交期间的同步防连点 guard:setState 异步,连点窗口内靠 ref 拦截重复提交
+  const compactInFlightRef = useRef(false);
+  // 归档 agent 不可发送压缩
+  const canCompact = !archived;
+
+  /**
+   * 卡片压缩按钮:仅向本卡 agent 发送 /compact(activeTurnBehavior 显式 "steer",
+   * 缺省时 daemon 会打断当前回合;send resolve 即 daemon 已受理)。普通消息队列、
+   * 其他会话草稿、finished 关注 ack 均不触碰;归档卡片不渲染该按钮。
+   */
+  const handleCompact = useCallback(() => {
+    if (!canCompact || compactInFlightRef.current) return;
+    compactInFlightRef.current = true;
+    setCompactPending(true);
+    const mid = `compact_${agentId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    void paseo.agents
+      .ref(agentId)
+      .send("/compact", { activeTurnBehavior: "steer", messageId: mid })
+      .then(() => {
+        // 只报告"已提交",不声称压缩已完成(由 provider 会话异步完成)
+        toast.show("压缩命令已提交");
+      })
+      .catch((error: unknown) => {
+        toast.error(error instanceof Error ? error.message : "压缩命令发送失败");
+      })
+      .finally(() => {
+        compactInFlightRef.current = false;
+        setCompactPending(false);
+      });
+  }, [agentId, canCompact, paseo, toast]);
+
   const styles = useMemo(
     () =>
       StyleSheet.create({
@@ -212,6 +263,17 @@ export const AgentCard = memo(function AgentCard({
         // 元数据行固定高度,内容缺失时保留占位,卡片高度不随数据抖动
         metaRow: { flexDirection: "row", alignItems: "center", gap: 4, height: 13 },
         metaText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
+        // 上下文行:环形占用 + used/max + 右端压缩按钮;文本可压缩,按钮不缩
+        contextRow: {
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 4,
+          height: 13,
+          marginTop: 1,
+        },
+        contextText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13, flexShrink: 1 },
+        compactButton: { flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 3 },
+        compactText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
         wsText: {
           flex: 1,
           color: theme.colors.foregroundMuted,
@@ -247,6 +309,19 @@ export const AgentCard = memo(function AgentCard({
   const metaTopText = [thinkingLabel ? `思考 ${thinkingLabel}` : null, speedLabel]
     .filter(Boolean)
     .join(" · ");
+  // 上下文占用:T01 的 metadata.context;字段缺失/整体 null/两端皆未知 → 展示"上下文 —"
+  const context = metadata?.context ?? null;
+  const contextRatio =
+    context && context.used !== null && context.max !== null && context.max > 0
+      ? context.used / context.max
+      : null;
+  const contextText = !context
+    ? "上下文 —"
+    : context.used === null && context.max === null
+      ? "上下文 —"
+      : `${context.used !== null ? formatTokens(context.used) : "—"} / ${
+          context.max !== null ? formatTokens(context.max) : "—"
+        }`;
   const opacity = archived ? 0.4 : 1;
   const statusLabel = archived
     ? "已归档"
@@ -305,6 +380,36 @@ export const AgentCard = memo(function AgentCard({
                 {metadata.branch}
               </Text>
             </>
+          ) : null}
+        </View>
+        <View style={styles.contextRow}>
+          {contextRatio !== null ? (
+            <ContextMeter
+              ratio={contextRatio}
+              trackColor={theme.colors.border}
+              progressColor={contextRatio > 0.85 ? theme.colors.statusDanger : theme.colors.accent}
+              size={11}
+              thickness={2}
+            />
+          ) : null}
+          <Text style={styles.contextText} numberOfLines={1} ellipsizeMode="tail">
+            {contextText}
+          </Text>
+          {/* 归档不可发送压缩;onPress 阻断冒泡,避免触发卡片选中/收起内置会话,
+              也不顺带 ack finished 关注;提交期间禁用,连点由 ref guard 同步拦截 */}
+          {canCompact ? (
+            <Pressable
+              onPress={(event) => {
+                event.stopPropagation();
+                handleCompact();
+              }}
+              disabled={compactPending}
+              hitSlop={{ top: 5, bottom: 5, left: 4, right: 4 }}
+              accessibilityRole="button"
+              accessibilityLabel="压缩上下文"
+            >
+              <Text style={styles.compactText}>{compactPending ? "提交中" : "压缩"}</Text>
+            </Pressable>
           ) : null}
         </View>
       </View>

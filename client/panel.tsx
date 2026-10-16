@@ -23,9 +23,10 @@ import { useAgentMetadata } from "./agent-metadata";
 
 const CARD_W = 196;
 const CARD_W_COMPACT = 164;
-// 原内容(92) + 两行元数据(思考/速度、分支,约 32) + 一行 workspace 标识的预留余量(16)
-const CARD_H = 140;
-const CARD_H_COMPACT = 140;
+// 原内容 + 两行元数据(思考/速度、分支) + 一行 workspace 标识的预留余量
+// + 上下文行(占用环 + used/max + 压缩按钮,约 17)
+const CARD_H = 148;
+const CARD_H_COMPACT = 148;
 const GAP_X = 26;
 const GAP_Y = 58;
 // 父卡片底部两侧各留的边距:多条边在该范围内分配唯一出线点
