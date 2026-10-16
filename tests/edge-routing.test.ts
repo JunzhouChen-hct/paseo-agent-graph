@@ -301,10 +301,10 @@ test("buildPathCurve:圆角只向拐角内侧切,不越出直角路径外侧", (
   }
 });
 
-test("渲染视图数上界:直连 ≤ 24,绕行 ≤ 40(采样+圆弧,远低于数百)", () => {
-  // 直连:长边(900px)
+test("渲染视图数上界:直连 ≤ 48,绕行 ≤ 40(自适应细分,远低于数百)", () => {
+  // 直连:长边(900px);0.15px 容差自适应细分下长曲线最多 ~40 段
   const longCurve = planEdgePath({ x: 0, y: 0 }, { x: 900, y: 700 }, []);
-  assert.ok(buildSegmentViews(longCurve.sampled, 2).length <= 24);
+  assert.ok(buildSegmentViews(longCurve.sampled, 2).length <= 48);
   // 绕行:5 直段 + 4 圆角(每角 ≤8 采样)
   const layout = baselineFixture();
   const { edges } = planFixtureEdges(layout, 200, 140, () => 100);
@@ -451,6 +451,8 @@ test("回归:LCG 40 seed 多根深树 sweep,双裕量零碰撞零退化(含视�
   let total = 0;
   let routed = 0;
   let maxViews = 0;
+  let maxDirectViews = 0;
+  let maxRoutedViews = 0;
   const started = Date.now();
   for (let seed = 1; seed <= 40; seed++) {
     const parents = lcgParents(seed);
@@ -474,10 +476,12 @@ test("回归:LCG 40 seed 多根深树 sweep,双裕量零碰撞零退化(含视�
           false,
           `seed=${seed} margin=${margin} 边 ${edge.parentId}->${edge.childId} 退化直连`,
         );
-        // 视图数上界:直连 ≤ 24,绕行 ≤ 40(圆角采样 + DP 简化后)
+        // 视图数上界:直连 ≤ 48(自适应细分 0.15px 容差),绕行 ≤ 40
         const views = buildSegmentViews(edge.planned.sampled, 2).length;
         maxViews = Math.max(maxViews, views);
-        const bound = edge.planned.direct ? 24 : 40;
+        if (edge.planned.direct) maxDirectViews = Math.max(maxDirectViews, views);
+        else maxRoutedViews = Math.max(maxRoutedViews, views);
+        const bound = edge.planned.direct ? 48 : 40;
         assert.ok(views <= bound, `seed=${seed} margin=${margin} 边 ${edge.parentId}->${edge.childId} 视图数 ${views} 超上界 ${bound}`);
       }
     }
@@ -486,6 +490,6 @@ test("回归:LCG 40 seed 多根深树 sweep,双裕量零碰撞零退化(含视�
   // 性能基线(4 核 CI 量级):sweep 为 80 次整图规划(每次 ~29 条边),毫秒级单边
   assert.ok(elapsed < 60000, `sweep 耗时 ${elapsed}ms 过慢`);
   console.log(
-    `LCG sweep: ${total} 条边(40 seeds × 双裕量), 绕行 ${routed}, 单边最大视图 ${maxViews}, 耗时 ${elapsed}ms`,
+    `LCG sweep: ${total} 条边(40 seeds × 双裕量), 绕行 ${routed}, 单边最大视图 ${maxViews}(直连 ${maxDirectViews} / 绕行 ${maxRoutedViews}), 耗时 ${elapsed}ms`,
   );
 });

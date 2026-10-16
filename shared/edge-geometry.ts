@@ -49,6 +49,59 @@ export const PATH_MIN_LENGTH = 0.5;
 /** 累计弧长下限:保证插值 inputRange 严格递增 */
 export const CUMULATIVE_EPS = 0.001;
 
+/**
+ * 直连贝塞尔自适应细分的弦偏差容差(px):细分后每段弦与真实曲线的
+ * 最大距离上界(平坦度判据:0.75 × 控制点到弦线最大距离 ≥ 曲线到弦
+ * 线的距离,见 adaptiveCubicPoints)。0.4px 的均匀采样+DP 简化在
+ * 典型短边(dx37/dy58)上产生可感知的折角,0.15px 接近 1 物理像素的
+ * 一半,再细分不会带来可见改善,只增加视图数。
+ */
+export const CURVE_TOLERANCE = 0.15;
+/** 自适应细分最大递归深度(2^-18 ≈ 4e-6 参数步,防退化循环) */
+const MAX_SUBDIV_DEPTH = 18;
+/** 单条曲线细分点数上限(防病态曲线视图爆炸) */
+const MAX_CURVE_POINTS = 160;
+
+/** 点到直线 a-b 的距离(平坦度判据用,带符号无关) */
+function pointLineDistance(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = Math.hypot(dx, dy);
+  if (length < 1e-12) return Math.hypot(p.x - a.x, p.y - a.y);
+  return Math.abs((p.x - a.x) * dy - (p.y - a.y) * dx) / length;
+}
+
+/**
+ * 三次贝塞尔平坦度自适应细分(de Casteljau 中点二分):
+ * 控制点到弦线距离的最大者 × 3/4 是曲线偏离弦线的上界,低于容差即
+ * 以弦 [p0,p3] 收尾;否则中点分裂递归。曲率低处弦长,曲率高处弦短,
+ * 相比均匀 t 采样用更少的段达到更小的几何误差。
+ */
+function adaptiveCubicPoints(
+  p0: Point,
+  p1: Point,
+  p2: Point,
+  p3: Point,
+  tolerance: number,
+  depth: number,
+  out: Point[],
+): void {
+  const flatness =
+    (3 / 4) * Math.max(pointLineDistance(p1, p0, p3), pointLineDistance(p2, p0, p3));
+  if (flatness <= tolerance || depth >= MAX_SUBDIV_DEPTH || out.length >= MAX_CURVE_POINTS) {
+    out.push(p3);
+    return;
+  }
+  const p01 = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+  const p12 = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+  const p23 = { x: (p2.x + p3.x) / 2, y: (p2.y + p3.y) / 2 };
+  const p012 = { x: (p01.x + p12.x) / 2, y: (p01.y + p12.y) / 2 };
+  const p123 = { x: (p12.x + p23.x) / 2, y: (p12.y + p23.y) / 2 };
+  const mid = { x: (p012.x + p123.x) / 2, y: (p012.y + p123.y) / 2 };
+  adaptiveCubicPoints(p0, p01, p012, mid, tolerance, depth + 1, out);
+  adaptiveCubicPoints(mid, p123, p23, p3, tolerance, depth + 1, out);
+}
+
 /** 三次贝塞尔取点 */
 export function cubicBezierPoint(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
   const u = 1 - t;
@@ -60,22 +113,6 @@ export function cubicBezierPoint(p0: Point, p1: Point, p2: Point, p3: Point, t: 
     x: a * p0.x + b * p1.x + c * p2.x + d * p3.x,
     y: a * p0.y + b * p1.y + c * p2.y + d * p3.y,
   };
-}
-
-function samplePoints(p0: Point, p1: Point, p2: Point, p3: Point, segments: number): Point[] {
-  const list: Point[] = [];
-  for (let i = 0; i <= segments; i++) {
-    list.push(cubicBezierPoint(p0, p1, p2, p3, i / segments));
-  }
-  return list;
-}
-
-function polylineLength(points: Point[]): number {
-  let length = 0;
-  for (let i = 1; i < points.length; i++) {
-    length += Math.hypot(points[i]!.x - points[i - 1]!.x, points[i]!.y - points[i - 1]!.y);
-  }
-  return length;
 }
 
 /** 折线累计弧长;相邻重合点夹极小步进,保持严格递增 */
@@ -137,8 +174,9 @@ export function simplifyPolyline(points: readonly Point[], tolerance: number): P
 /**
  * 构建“竖直切出”的三次贝塞尔直连曲线:两端切线均竖直,
  * 控制距离随垂直距离缩放并夹在 [20, 90]。
- * 采样后做 DP 简化(容差 0.4px):相邻简化段共享端点,
- * 配合圆头渲染即成圆角接缝(见 buildSegmentViews)。
+ * 采样用平坦度自适应细分:每段弦对真实曲线的偏差 ≤ CURVE_TOLERANCE,
+ * 直段处弦自动变长(视图少),曲率大处弦自动变短(误差可控),
+ * 相邻段共享端点,配合圆头渲染即成圆角接缝(见 buildSegmentViews)。
  */
 export function buildEdgeCurve(from: Point, to: Point): EdgeCurve {
   const dy = to.y - from.y;
@@ -148,12 +186,8 @@ export function buildEdgeCurve(from: Point, to: Point): EdgeCurve {
   const cp1: Point = { x: from.x, y: from.y + control };
   const cp2: Point = { x: to.x, y: to.y - control };
 
-  // 先粗采样估弧长,再按目标段长(约 10px)决定正式采样数
-  const estimate = samplePoints(from, cp1, cp2, to, 12);
-  const approx = polylineLength(estimate);
-  const segments = Math.min(64, Math.max(8, Math.ceil(approx / 10)));
-  const raw = samplePoints(from, cp1, cp2, to, segments);
-  const points = simplifyPolyline(raw, 0.4);
+  const points: Point[] = [from];
+  adaptiveCubicPoints(from, cp1, cp2, to, CURVE_TOLERANCE, 0, points);
   const cumulative = cumulativeLengths(points);
   // 全零弧长(重合点)时夹一个极小值,保证 inputRange 严格递增不产生 NaN
   const total = cumulative[cumulative.length - 1] ?? 0;

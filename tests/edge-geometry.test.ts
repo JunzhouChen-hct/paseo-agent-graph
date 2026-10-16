@@ -7,7 +7,9 @@ import {
   buildPathCurve,
   buildSegmentViews,
   cubicBezierPoint,
+  CURVE_TOLERANCE,
   pointAtLength,
+  simplifyPolyline,
   type Point,
 } from "../shared/edge-geometry";
 
@@ -239,4 +241,92 @@ test("接缝几何:90° 拐角共享点处全向覆盖(round join),外侧无缺�
   }
   // 内凹侧同样覆盖(圆盘语义)
   assert.ok(views.some((view) => capsuleCovers(view, { x: 49.3, y: 0.7 }, 2)));
+});
+
+// ---------------------------------------------------------------------------
+// 减锯齿的精度验证:渲染折线相对解析贝塞尔的真实几何误差。
+// 不只断言"段数更少"——用密集解析取点(4096 个)到折线的最小距离的
+// 最大值作为误差度量,并与旧基线(均匀 t 采样 ~10px/段 + DP 0.4 简化,
+// 即 106f9f0 直连的实现)对比,新实现必须误差更小。
+// ---------------------------------------------------------------------------
+
+function pointSegmentDistance(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq < 1e-12) return Math.hypot(p.x - a.x, p.y - a.y);
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSq;
+  t = Math.min(Math.max(t, 0), 1);
+  return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+}
+
+/** 解析贝塞尔密集取点到渲染折线的最大几何偏差(px) */
+function maxDeviationToPolyline(
+  from: Point,
+  cp1: Point,
+  cp2: Point,
+  to: Point,
+  polyline: readonly Point[],
+): number {
+  const DENSE = 4096;
+  let max = 0;
+  for (let i = 0; i <= DENSE; i++) {
+    const p = cubicBezierPoint(from, cp1, cp2, to, i / DENSE);
+    let min = Infinity;
+    for (let s = 1; s < polyline.length; s++) {
+      min = Math.min(min, pointSegmentDistance(p, polyline[s - 1]!, polyline[s]!));
+    }
+    max = Math.max(max, min);
+  }
+  return max;
+}
+
+/** 旧基线折线(106f9f0 直连实现):均匀 t 采样 ~10px/段 + DP 0.4 简化 */
+function oldBaselinePolyline(from: Point, cp1: Point, cp2: Point, to: Point): Point[] {
+  const estimate: Point[] = [];
+  for (let i = 0; i <= 12; i++) estimate.push(cubicBezierPoint(from, cp1, cp2, to, i / 12));
+  let approx = 0;
+  for (let i = 1; i < estimate.length; i++) {
+    approx += Math.hypot(estimate[i]!.x - estimate[i - 1]!.x, estimate[i]!.y - estimate[i - 1]!.y);
+  }
+  const segments = Math.min(64, Math.max(8, Math.ceil(approx / 10)));
+  const raw: Point[] = [];
+  for (let i = 0; i <= segments; i++) raw.push(cubicBezierPoint(from, cp1, cp2, to, i / segments));
+  return simplifyPolyline(raw, 0.4);
+}
+
+test("减锯齿:直连曲线渲染折线对解析贝塞尔的最大偏差 ≤ 0.2px 且优于旧基线", () => {
+  // 主 Agent 实测场景:dy=58(单行间距),dx = 37/100/400/1000
+  for (const dx of [37, 100, 400, 1000]) {
+    const from: Point = { x: 0, y: 0 };
+    const to: Point = { x: dx, y: 58 };
+    const control = Math.min(90, Math.max(20, Math.abs(58) * 0.45));
+    const cp1 = { x: from.x, y: from.y + control };
+    const cp2 = { x: to.x, y: to.y - control };
+    const curve = buildEdgeCurve(from, to);
+    const deviation = maxDeviationToPolyline(from, cp1, cp2, to, curve.points);
+    const oldDeviation = maxDeviationToPolyline(
+      from,
+      cp1,
+      cp2,
+      to,
+      oldBaselinePolyline(from, cp1, cp2, to),
+    );
+    console.log(
+      `dx=${dx}: 自适应细分 ${curve.points.length - 1} 段 偏差 ${deviation.toFixed(3)}px | 旧基线 ${
+        oldBaselinePolyline(from, cp1, cp2, to).length - 1
+      } 段 偏差 ${oldDeviation.toFixed(3)}px`,
+    );
+    assert.ok(
+      deviation <= 0.2,
+      `dx=${dx} 偏差 ${deviation.toFixed(3)}px 超过 0.2px`,
+    );
+    assert.ok(
+      deviation <= oldDeviation,
+      `dx=${dx} 自适应偏差 ${deviation.toFixed(3)}px 未优于旧基线 ${oldDeviation.toFixed(3)}px`,
+    );
+    // 视图数不爆炸:偏差收紧后段数增加是预期的,但不得数量级增长
+    assert.ok(curve.points.length - 1 <= 64, `dx=${dx} 段数 ${curve.points.length - 1} 超上界`);
+  }
+  assert.equal(CURVE_TOLERANCE, 0.15);
 });
