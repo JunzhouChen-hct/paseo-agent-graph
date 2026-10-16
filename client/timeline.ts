@@ -139,6 +139,10 @@ export function useAgentTimeline(
   // useState 清空要等 effect(commit 后)才生效,首帧仍会渲染上个会话的 items/extras
   // (含上下文占用);这里在 render 输出处做 gate,只暴露属于当前 agentId 的数据。
   const scopeRef = useRef<string | null>(null);
+  // 错误归属:fetch 失败时不更新 scopeRef(数据 gate 仍拦截旧会话数据),
+  // 错误单独记录归属;否则初次加载失败也查无 scope,错误被 gate 吞掉,
+  // 面板误显示"暂无对话记录"而不是真实失败原因
+  const errorScopeRef = useRef<string | null>(null);
   // 当前 agentId 镜像:reload 可能以旧闭包被调用(如切换会话前发出的异步回调持有了
   // 旧会话的 reload),此时请求所属会话已不是当前会话,直接忽略,
   // 避免旧会话响应递增全局序号挤掉新会话请求、并覆盖新会话数据
@@ -171,6 +175,7 @@ export function useAgentTimeline(
       setExtras(extractExtras(payload));
     } catch (err) {
       if (seq !== reloadSeqRef.current) return;
+      errorScopeRef.current = agentId;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       if (seq === reloadSeqRef.current) setLoading(false);
@@ -186,7 +191,7 @@ export function useAgentTimeline(
     items: scoped ? items : [],
     extras: scoped ? extras : null,
     loading,
-    error: scoped ? error : null,
+    error: errorScopeRef.current === agentId ? error : null,
     reload,
   };
 }
