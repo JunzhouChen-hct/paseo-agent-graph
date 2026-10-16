@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RpcInput } from "@getpaseo/plugin";
-import { acceptAgentRpc, cancelAgentRpc, configureAgentRpc, debugReportRpc } from "../shared/graph";
+import { acceptAgentRpc, cancelAgentRpc, configureAgentRpc, debugReportRpc, renameAgentRpc, sanitizeRenameTitle } from "../shared/graph";
 
 interface DaemonLease {
   client: DaemonClient;
@@ -101,6 +101,25 @@ export async function handleAccept({ agentId }: RpcInput<typeof acceptAgentRpc>)
   } catch (error) {
     lease = null;
     return { ok: false, cleared: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** 重命名会话标题:走官方 update_agent_request(name 即 title)。daemon 响应
+ *  accepted=false 时 SDK 会抛出携带 error 文本的异常,此处转换为 {ok:false} 上报,
+ *  由客户端决定失败时的 UI(保留草稿)。空白标题在 server 侧明确拒绝。 */
+export async function handleRename({
+  agentId,
+  title,
+}: RpcInput<typeof renameAgentRpc>) {
+  const normalized = sanitizeRenameTitle(title);
+  if (!normalized) return { ok: false, error: "标题不能为空白" };
+  try {
+    const daemon = await acquireDaemon();
+    await daemon.updateAgent(agentId, { name: normalized });
+    return { ok: true, error: null };
+  } catch (error) {
+    lease = null;
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 

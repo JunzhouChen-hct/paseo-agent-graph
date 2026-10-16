@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Image, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useAgent, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
-import { acceptAgentRpc, configureAgentRpc } from "../shared/graph";
+import { acceptAgentRpc, configureAgentRpc, renameAgentRpc } from "../shared/graph";
 import { agentGraphSettings } from "../shared/settings";
 import { useAgentTimeline, type AgentExtras, type TimelineView } from "./timeline";
 import { canReadClipboardImage, readClipboardImage, type ClipboardImage } from "./web";
 import { ContextMeter } from "./context-meter";
+import { FeedbackPressable } from "./feedback-pressable";
 
 interface PickerRequest {
   title: string;
@@ -216,6 +217,7 @@ export function AgentConsole({
   const toast = useToast();
   const configure = useRpc(configureAgentRpc);
   const accept = useRpc(acceptAgentRpc);
+  const renameAgent = useRpc(renameAgentRpc);
   const settings = useSettings(agentGraphSettings);
   const settingsValues = settings.status === "ready" ? settings.values : null;
   const sendBehavior = settingsValues?.sendBehavior ?? "steer";
@@ -236,6 +238,10 @@ export function AgentConsole({
   const [images, setImages] = useState<ClipboardImage[]>([]);
   const [models, setModels] = useState<{ id: string; label: string }[] | null>(null);
   const [picker, setPicker] = useState<PickerRequest | null>(null);
+  // 重命名话题输入:open 时固化目标 agentId(切换会话 guard 用),
+  // draft 失败时保留;renaming 为 pending 同步锁,防重入
+  const [rename, setRename] = useState<{ agentId: string; draft: string } | null>(null);
+  const [renaming, setRenaming] = useState(false);
   const [sending, setSending] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [pendingQueue, setPendingQueue] = useState<PendingMessage[]>([]);
@@ -418,6 +424,46 @@ export function AgentConsole({
     });
   }, []);
 
+  // —— 重命名话题 ——
+  const openRename = useCallback(() => {
+    if (renaming) return; // 提交中不开新输入
+    setRename({ agentId, draft: agentLive?.title?.trim() || "" });
+  }, [agentId, agentLive?.title, renaming]);
+
+  const closeRename = useCallback(() => {
+    if (renaming) return; // 提交中不因点击遮罩/取消打断在途请求
+    setRename(null);
+  }, [renaming]);
+
+  const submitRename = useCallback(async () => {
+    const target = rename;
+    if (!target || renaming) return; // pending 同步锁防重入
+    const title = target.draft.trim();
+    if (!title) {
+      toast.show("标题不能为空白");
+      return;
+    }
+    // 切换会话 guard:输入期间 agent 已切换则直接丢弃,绝不改错 agent
+    if (target.agentId !== agentIdRef.current) {
+      setRename(null);
+      return;
+    }
+    setRenaming(true);
+    try {
+      const result = await renameAgent({ agentId: target.agentId, title });
+      if (result.ok) {
+        setRename(null); // 成功:useAgent 订阅自动带来新 title,无需手动改本地
+      } else {
+        // 失败保留草稿,可直接改字重试
+        toast.error(result.error ?? "重命名失败");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "重命名失败");
+    } finally {
+      setRenaming(false);
+    }
+  }, [rename, renaming, renameAgent, toast]);
+
   // 排队消息出现在 timeline 后(回合开始处理)摘掉本地排队标记
   useEffect(() => {
     if (pendingQueue.length === 0) return;
@@ -469,6 +515,8 @@ export function AgentConsole({
     sentMidsRef.current = new Set();
     prevFinishedAttentionRef.current = false;
     prevStatusRef.current = agentLive?.status;
+    // 切换会话 guard:未完成的重命名输入随会话切换一并丢弃,防止改错 agent
+    setRename(null);
     // agentId 变化时 agentLive 可能还是旧值,下一轮 status 订阅更新会把 prevStatusRef 校准
   }, [agentId, updatePendingQueue]); // 仅在切换 agent 时重置(故意不依赖 agentLive.status)
 
@@ -588,7 +636,25 @@ export function AgentConsole({
           paddingBottom: 2,
         },
         headerTitle: { color: theme.colors.foreground, fontSize: 12, fontWeight: "600", flex: 1 },
-        headerButton: { padding: 4 },
+        headerTitleWrap: {
+          // 标题整体可点(文本+铅笔图标);flex:1 兜住长标题截断,不挤掉右侧按钮
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 4,
+          flex: 1,
+          borderRadius: 6,
+          paddingHorizontal: 4,
+          paddingVertical: 2,
+          marginLeft: -4,
+          cursor: "pointer",
+        },
+        headerButton: { padding: 4, borderRadius: 6 },
+        // hover/pressed 高亮:同层级已有 surface2 的元素用 surface0 反差,扁平元素用 surface2
+        hoverRaised: { backgroundColor: theme.colors.surface2, cursor: "pointer" },
+        hoverInset: { backgroundColor: theme.colors.surface2 },
+        hoverChip: { backgroundColor: theme.colors.surface0, cursor: "pointer" },
+        hoverDim: { opacity: 0.8 },
+        hoverAccent: { opacity: 0.85 },
         log: { flex: 1, paddingHorizontal: compact ? 10 : 14, paddingVertical: 6 },
         row: { marginBottom: 8 },
         rowUser: { alignItems: "flex-end" },
@@ -720,6 +786,32 @@ export function AgentConsole({
           borderBottomColor: theme.colors.border,
         },
         pickerRowText: { color: theme.colors.foreground, fontSize: 13, flex: 1 },
+        renameInput: {
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          borderRadius: 8,
+          backgroundColor: theme.colors.surface2,
+          color: theme.colors.foreground,
+          paddingHorizontal: 10,
+          paddingVertical: 7,
+          fontSize: 12,
+        },
+        renameActions: {
+          flexDirection: "row",
+          justifyContent: "flex-end",
+          gap: 8,
+          marginTop: 14,
+        },
+        renameButton: {
+          borderRadius: 8,
+          paddingVertical: 6,
+          paddingHorizontal: 14,
+          backgroundColor: theme.colors.surface2,
+          cursor: "pointer",
+        },
+        renameConfirm: { backgroundColor: theme.colors.accent },
+        renameButtonText: { color: theme.colors.foreground, fontSize: 12 },
+        renameConfirmText: { color: theme.colors.accentForeground, fontSize: 12 },
       }),
     [theme, compact, height, sending],
   );
@@ -793,8 +885,9 @@ export function AgentConsole({
     const open = expanded.has(block.key);
     return (
       <View key={block.key} style={styles.groupRow}>
-        <Pressable
+        <FeedbackPressable
           style={styles.groupHeader}
+          hoverStyle={styles.hoverInset}
           onPress={() => toggleExpand(block.key)}
           accessibilityRole="button"
           accessibilityState={{ expanded: open }}
@@ -805,7 +898,7 @@ export function AgentConsole({
             {block.reasoningCount > 0 ? ` · ${block.reasoningCount} 推理` : ""}
             {block.toolCount > 0 ? ` · ${block.toolCount} 操作` : ""}
           </Text>
-        </Pressable>
+        </FeedbackPressable>
         {open ? <View style={styles.groupBody}>{block.steps.map(renderRow)}</View> : null}
       </View>
     );
@@ -837,21 +930,40 @@ export function AgentConsole({
       </View>
       <View style={styles.header}>
         <Icon name="MessagesSquare" size={13} color={theme.colors.foregroundMuted} />
-        <Text style={styles.headerTitle} numberOfLines={1}>
-          {agentLive?.title?.trim() || "会话"}
-        </Text>
+        <FeedbackPressable
+          style={styles.headerTitleWrap}
+          hoverStyle={styles.hoverRaised}
+          onPress={openRename}
+          accessibilityRole="button"
+          accessibilityLabel="重命名会话"
+        >
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            {agentLive?.title?.trim() || "会话"}
+          </Text>
+          <Icon name="Pencil" size={11} color={theme.colors.foregroundMuted} />
+        </FeedbackPressable>
         {queueCount > 0 ? (
           <View style={styles.queueBadge}>
             <Icon name="Clock" size={11} color={theme.colors.statusWarning} />
             <Text style={styles.queueBadgeText}>{`队列 ${queueCount}`}</Text>
           </View>
         ) : null}
-        <Pressable style={styles.headerButton} onPress={() => void reload()} accessibilityLabel="刷新">
+        <FeedbackPressable
+          style={styles.headerButton}
+          hoverStyle={styles.hoverRaised}
+          onPress={() => void reload()}
+          accessibilityLabel="刷新"
+        >
           <Icon name="RotateCw" size={13} color={theme.colors.foregroundMuted} />
-        </Pressable>
-        <Pressable style={styles.headerButton} onPress={onCollapse} accessibilityLabel="收起">
+        </FeedbackPressable>
+        <FeedbackPressable
+          style={styles.headerButton}
+          hoverStyle={styles.hoverRaised}
+          onPress={onCollapse}
+          accessibilityLabel="收起"
+        >
           <Icon name="ChevronDown" size={13} color={theme.colors.foregroundMuted} />
-        </Pressable>
+        </FeedbackPressable>
       </View>
 
       <ScrollView ref={logRef} style={styles.log}>
@@ -877,8 +989,9 @@ export function AgentConsole({
       </ScrollView>
 
       <View style={styles.controls}>
-        <Pressable
+        <FeedbackPressable
           style={styles.chip}
+          hoverStyle={styles.hoverChip}
           onPress={() =>
             models && models.length > 0
               ? setPicker({
@@ -894,10 +1007,11 @@ export function AgentConsole({
           <Text style={styles.chipText} numberOfLines={1}>
             {extras?.model ?? "模型"}
           </Text>
-        </Pressable>
+        </FeedbackPressable>
         {extras && extras.modes.length > 0 ? (
-          <Pressable
+          <FeedbackPressable
             style={styles.chip}
+            hoverStyle={styles.hoverChip}
             onPress={() =>
               setPicker({
                 title: "权限策略 / 模式",
@@ -911,11 +1025,12 @@ export function AgentConsole({
             <Text style={styles.chipText} numberOfLines={1}>
               {currentMode?.label ?? extras.currentModeId ?? "模式"}
             </Text>
-          </Pressable>
+          </FeedbackPressable>
         ) : null}
         {extras?.thinkingOptions ? (
-          <Pressable
+          <FeedbackPressable
             style={styles.chip}
+            hoverStyle={styles.hoverChip}
             onPress={() =>
               setPicker({
                 title: "思考强度",
@@ -929,7 +1044,7 @@ export function AgentConsole({
             <Text style={styles.chipText} numberOfLines={1}>
               {currentThinking?.label ?? "思考"}
             </Text>
-          </Pressable>
+          </FeedbackPressable>
         ) : null}
         <View style={styles.chip}>
           {contextRatio !== null ? (
@@ -947,8 +1062,9 @@ export function AgentConsole({
               : "上下文 —"}
           </Text>
         </View>
-        <Pressable
+        <FeedbackPressable
           style={styles.compactButton}
+          hoverStyle={styles.hoverChip}
           onPress={() => void handleCompact()}
           disabled={sending}
           accessibilityRole="button"
@@ -956,15 +1072,16 @@ export function AgentConsole({
         >
           <Icon name="Eraser" size={12} color={theme.colors.foregroundMuted} />
           <Text style={styles.chipText}>{sending ? "提交中…" : "压缩"}</Text>
-        </Pressable>
+        </FeedbackPressable>
       </View>
 
       {images.length > 0 ? (
         <View style={styles.attachments}>
           {images.map((image, index) => (
-            <Pressable
+            <FeedbackPressable
               key={`${index}-${image.mimeType}`}
               style={styles.attachment}
+              hoverStyle={styles.hoverDim}
               onPress={() => setImages((current) => current.filter((_, i) => i !== index))}
               accessibilityLabel="移除图片"
             >
@@ -973,16 +1090,21 @@ export function AgentConsole({
                 style={{ flex: 1 }}
                 resizeMode="cover"
               />
-            </Pressable>
+            </FeedbackPressable>
           ))}
         </View>
       ) : null}
 
       <View style={styles.composer}>
         {canReadClipboardImage ? (
-          <Pressable style={styles.iconButton} onPress={() => void handleAttach()} accessibilityLabel="插入剪贴板图片">
+          <FeedbackPressable
+            style={styles.iconButton}
+            hoverStyle={styles.hoverChip}
+            onPress={() => void handleAttach()}
+            accessibilityLabel="插入剪贴板图片"
+          >
             <Icon name="ImagePlus" size={14} color={theme.colors.foregroundMuted} />
-          </Pressable>
+          </FeedbackPressable>
         ) : null}
         <TextInput
           style={styles.input}
@@ -998,14 +1120,15 @@ export function AgentConsole({
           }}
           blurOnSubmit={false}
         />
-        <Pressable
+        <FeedbackPressable
           style={styles.sendButton}
+          hoverStyle={styles.hoverAccent}
           onPress={() => void handleSend()}
           disabled={sending}
           accessibilityLabel="发送"
         >
           <Icon name="Send" size={14} color={theme.colors.accentForeground} />
-        </Pressable>
+        </FeedbackPressable>
       </View>
 
       <Modal
@@ -1020,9 +1143,10 @@ export function AgentConsole({
             {(picker?.options ?? []).map((option) => {
               const active = picker?.currentId === option.id;
               return (
-                <Pressable
+                <FeedbackPressable
                   key={option.id}
                   style={styles.pickerRow}
+                  hoverStyle={styles.hoverInset}
                   onPress={() => {
                     const pick = picker?.onPick;
                     setPicker(null);
@@ -1033,10 +1157,56 @@ export function AgentConsole({
                   {active ? (
                     <Icon name="Check" size={15} color={theme.colors.statusSuccess} />
                   ) : null}
-                </Pressable>
+                </FeedbackPressable>
               );
             })}
           </ScrollView>
+        </Modal.Content>
+      </Modal>
+
+      <Modal
+        title="重命名会话"
+        open={rename !== null}
+        onOpenChange={(open) => {
+          if (!open) closeRename();
+        }}
+      >
+        <Modal.Content>
+          <TextInput
+            style={styles.renameInput}
+            value={rename?.draft ?? ""}
+            onChangeText={(text) =>
+              setRename((current) => (current ? { ...current, draft: text } : current))
+            }
+            placeholder="输入新的会话标题"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            editable={!renaming}
+            autoFocus
+            onSubmitEditing={() => void submitRename()}
+            blurOnSubmit
+          />
+          <View style={styles.renameActions}>
+            <FeedbackPressable
+              style={styles.renameButton}
+              hoverStyle={styles.hoverChip}
+              onPress={closeRename}
+              disabled={renaming}
+              accessibilityRole="button"
+              accessibilityLabel="取消重命名"
+            >
+              <Text style={styles.renameButtonText}>取消</Text>
+            </FeedbackPressable>
+            <FeedbackPressable
+              style={[styles.renameButton, styles.renameConfirm]}
+              hoverStyle={styles.hoverAccent}
+              onPress={() => void submitRename()}
+              disabled={renaming || !(rename?.draft.trim())}
+              accessibilityRole="button"
+              accessibilityLabel="确认重命名"
+            >
+              <Text style={styles.renameConfirmText}>{renaming ? "提交中…" : "确认"}</Text>
+            </FeedbackPressable>
+          </View>
         </Modal.Content>
       </Modal>
     </View>

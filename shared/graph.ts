@@ -78,3 +78,25 @@ export const configureAgentRpc = defineRpc({
   }),
   output: z.object({ ok: z.boolean(), error: z.string().nullable() }),
 });
+
+/**
+ * 重命名会话标题(agent title)。SDK 0.11.2 的 PaseoAgentHandle/PaseoApi 均未
+ * 暴露改名接口(唯一 title 写入口 setTitle 属于 workspace),由 server 端经
+ * DaemonClient lease 走官方 update_agent_request 完成:name 即会话标题。
+ * 输入要求非空;server 侧再经 sanitizeRenameTitle 清洗,空白明确拒绝返回
+ * error,不静默兜底。
+ */
+export const renameAgentRpc = defineRpc({
+  name: "agent-graph.rename",
+  input: z.object({
+    agentId: z.string().min(1),
+    title: z.string().min(1),
+  }),
+  output: z.object({ ok: z.boolean(), error: z.string().nullable() }),
+});
+
+/** 重命名标题的统一清洗:trim 后为空白返回 null(明确拒绝,不静默兜底)。 */
+export function sanitizeRenameTitle(title: string): string | null {
+  const trimmed = title.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
