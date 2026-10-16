@@ -237,9 +237,9 @@ export function AgentConsole({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [pendingQueue, setPendingQueue] = useState<PendingMessage[]>([]);
   // ref 组统一声明在任何同步读取点(useMemo/render 回调)之前,避免 TDZ ReferenceError
+  // pendingQueueRef 是队列权威源,仅在 updatePendingQueue 内更新,render 不反向同步
+  const pendingQueueRef = useRef<PendingMessage[]>([]);
   const prevStatusRef = useRef(agentLive?.status);
-  const pendingQueueRef = useRef(pendingQueue);
-  pendingQueueRef.current = pendingQueue;
   // 本面板发送成功过的消息 id:queuedIds 排队反推只认这些,命令与外部消息不误标
   const sentMidsRef = useRef<Set<string>>(new Set());
   const agentIdRef = useRef(agentId);
@@ -248,15 +248,15 @@ export function AgentConsole({
   const reflushRef = useRef(false);
   const logRef = useRef<ScrollView>(null);
 
-  // pendingQueue 的唯一更新入口:updater 内同步维护 ref,补跑/逐条检查立即可见
-  // 最新 sent 状态(仅 setPendingQueue 要等下次 render 才同步进 ref,补跑会读到旧值重发)
+  // pendingQueue 的唯一更新入口:ref 为权威源,同步计算后直接 setState。
+  // 不在 React updater 内写副作用(updater 可能延迟执行,读到的 ref 仍是旧值);
+  // 也不在 render 内用 state 反向同步 ref(未提交的 render 会覆盖权威 ref)。
+  // 连续调用基于 ref 串行计算,后值包含前值,直接 setPendingQueue 覆盖挂起更新是安全的。
   const updatePendingQueue = useCallback(
     (updater: (current: PendingMessage[]) => PendingMessage[]) => {
-      setPendingQueue((current) => {
-        const next = updater(current);
-        pendingQueueRef.current = next;
-        return next;
-      });
+      const next = updater(pendingQueueRef.current);
+      pendingQueueRef.current = next;
+      setPendingQueue(next);
     },
     [],
   );
