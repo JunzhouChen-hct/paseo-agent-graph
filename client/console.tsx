@@ -3,7 +3,7 @@ import { Image, ScrollView, StyleSheet, Text, TextInput, View } from "react-nati
 import { useAgent, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
-import { acceptAgentRpc, configureAgentRpc, renameAgentRpc } from "../shared/graph";
+import { acceptAgentRpc, configureAgentRpc, createRenameSubmitter, renameAgentRpc } from "../shared/graph";
 import { agentGraphSettings } from "../shared/settings";
 import { useAgentTimeline, type AgentExtras, type TimelineView } from "./timeline";
 import { canReadClipboardImage, readClipboardImage, type ClipboardImage } from "./web";
@@ -239,7 +239,7 @@ export function AgentConsole({
   const [models, setModels] = useState<{ id: string; label: string }[] | null>(null);
   const [picker, setPicker] = useState<PickerRequest | null>(null);
   // 重命名话题输入:open 时固化目标 agentId(切换会话 guard 用),
-  // draft 失败时保留;renaming 为 pending 同步锁,防重入
+  // draft 失败时保留;renaming 仅驱动 UI,防重入权威在 renamingRef(见提交器)
   const [rename, setRename] = useState<{ agentId: string; draft: string } | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [sending, setSending] = useState(false);
@@ -425,44 +425,36 @@ export function AgentConsole({
   }, []);
 
   // —— 重命名话题 ——
+  // 防重入的同步权威是 renamingRef(state 批处理不及时,"快速确认"或
+  // onSubmitEditing+按钮同帧两次调用时 state 还没更新,会并发);
+  // renaming state 仅驱动 UI 文案与 disabled。两者由提交器统一置位/释放。
+  const renamingRef = useRef(false);
   const openRename = useCallback(() => {
-    if (renaming) return; // 提交中不开新输入
+    if (renamingRef.current) return; // 提交中不开新输入
     setRename({ agentId, draft: agentLive?.title?.trim() || "" });
-  }, [agentId, agentLive?.title, renaming]);
+  }, [agentId, agentLive?.title]);
 
   const closeRename = useCallback(() => {
-    if (renaming) return; // 提交中不因点击遮罩/取消打断在途请求
+    if (renamingRef.current) return; // 提交中不因点击遮罩/取消打断在途请求
     setRename(null);
-  }, [renaming]);
+  }, []);
 
-  const submitRename = useCallback(async () => {
-    const target = rename;
-    if (!target || renaming) return; // pending 同步锁防重入
-    const title = target.draft.trim();
-    if (!title) {
-      toast.show("标题不能为空白");
-      return;
-    }
-    // 切换会话 guard:输入期间 agent 已切换则直接丢弃,绝不改错 agent
-    if (target.agentId !== agentIdRef.current) {
-      setRename(null);
-      return;
-    }
-    setRenaming(true);
-    try {
-      const result = await renameAgent({ agentId: target.agentId, title });
-      if (result.ok) {
-        setRename(null); // 成功:useAgent 订阅自动带来新 title,无需手动改本地
-      } else {
-        // 失败保留草稿,可直接改字重试
-        toast.error(result.error ?? "重命名失败");
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "重命名失败");
-    } finally {
-      setRenaming(false);
-    }
-  }, [rename, renaming, renameAgent, toast]);
+  const submitRename = useMemo(
+    () =>
+      createRenameSubmitter({
+        renameAgent: renameAgent,
+        onBlank: () => toast.show("标题不能为空白"),
+        onFailure: (message) => toast.error(message),
+        onSuccess: () => setRename(null),
+        onDiscard: () => setRename(null),
+        isCurrentAgent: (id) => id === agentIdRef.current,
+        onPendingChange: (pending) => {
+          renamingRef.current = pending; // await 前同步置位,finally 释放
+          setRenaming(pending);
+        },
+      }),
+    [renameAgent, toast],
+  );
 
   // 排队消息出现在 timeline 后(回合开始处理)摘掉本地排队标记
   useEffect(() => {
@@ -1182,7 +1174,7 @@ export function AgentConsole({
             placeholderTextColor={theme.colors.foregroundMuted}
             editable={!renaming}
             autoFocus
-            onSubmitEditing={() => void submitRename()}
+            onSubmitEditing={() => void submitRename(rename)}
             blurOnSubmit
           />
           <View style={styles.renameActions}>
@@ -1199,7 +1191,7 @@ export function AgentConsole({
             <FeedbackPressable
               style={[styles.renameButton, styles.renameConfirm]}
               hoverStyle={styles.hoverAccent}
-              onPress={() => void submitRename()}
+              onPress={() => void submitRename(rename)}
               disabled={renaming || !(rename?.draft.trim())}
               accessibilityRole="button"
               accessibilityLabel="确认重命名"

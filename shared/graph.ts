@@ -100,3 +100,53 @@ export function sanitizeRenameTitle(title: string): string | null {
   const trimmed = title.trim();
   return trimmed.length > 0 ? trimmed : null;
 }
+
+export interface RenameSubmitterDeps {
+  renameAgent(input: { agentId: string; title: string }): Promise<{ ok: boolean; error: string | null }>;
+  /** 草稿 trim 后为空白:提示且不触达 RPC */
+  onBlank(): void;
+  /** RPC 失败/抛错:提示,调用方保留草稿 */
+  onFailure(message: string): void;
+  /** 成功:调用方关闭输入(头部标题由订阅自动更新) */
+  onSuccess(): void;
+  /** 目标 agent 已不是当前会话:丢弃输入,绝不改错 agent */
+  onDiscard(): void;
+  isCurrentAgent(agentId: string): boolean;
+  /** pending 变化;置位发生在 await 之前,同步可用于 ref/state */
+  onPendingChange(pending: boolean): void;
+}
+
+/**
+ * 创建重命名提交器。防重入用闭包内的同步锁(等价 ref):置位发生在首个
+ * await 之前、finally 释放——React state 批处理不及时,"快速确认"或
+ * onSubmitEditing+按钮同帧两次调用时 state 尚未更新会并发,同步锁必须
+ * 先于任何 await 检查并置位。锁存续期间重复调用被直接丢弃。
+ * 纯依赖注入,client 组件与测试共用同一份提交路径。
+ */
+export function createRenameSubmitter(deps: RenameSubmitterDeps) {
+  let pending = false;
+  return async (target: { agentId: string; draft: string } | null): Promise<void> => {
+    if (!target || pending) return;
+    const title = sanitizeRenameTitle(target.draft);
+    if (!title) {
+      deps.onBlank();
+      return;
+    }
+    if (!deps.isCurrentAgent(target.agentId)) {
+      deps.onDiscard();
+      return;
+    }
+    pending = true; // await 前同步置位
+    deps.onPendingChange(true);
+    try {
+      const result = await deps.renameAgent({ agentId: target.agentId, title });
+      if (result.ok) deps.onSuccess();
+      else deps.onFailure(result.error ?? "重命名失败");
+    } catch (error) {
+      deps.onFailure(error instanceof Error ? error.message : "重命名失败");
+    } finally {
+      pending = false; // 任何路径都释放
+      deps.onPendingChange(false);
+    }
+  };
+}
