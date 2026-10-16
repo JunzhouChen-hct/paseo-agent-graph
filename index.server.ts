@@ -2,8 +2,10 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { agentGraphSettings } from "./shared/settings";
 import { agentGraphTemplatesSettings } from "./shared/templates";
 import { cancelAgentRpc, configureAgentRpc, debugReportRpc } from "./shared/graph";
+import { agentMetadataRpc } from "./shared/agent-metadata";
 import { importTemplateRpc, createTaskFromTemplateRpc } from "./shared/templates";
 import { closeDaemon, handleCancel, handleConfigure, handleDebugReport } from "./server/cancel";
+import { handleAgentMetadata } from "./server/agent-metadata";
 import { handleCreateTaskFromTemplate, handleImportTemplate } from "./server/templates";
 
 export default function contribute(server: PluginServerContext) {
@@ -13,6 +15,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(cancelAgentRpc, handleCancel);
   server.handle(configureAgentRpc, handleConfigure);
   server.handle(debugReportRpc, handleDebugReport);
+  server.handle(agentMetadataRpc, handleAgentMetadata);
   server.handle(importTemplateRpc, handleImportTemplate);
   server.handle(createTaskFromTemplateRpc, handleCreateTaskFromTemplate);
   return () => {

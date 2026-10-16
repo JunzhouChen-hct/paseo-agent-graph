@@ -6,6 +6,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { toneOf, type AgentRunStatus, type AgentTone } from "../shared/graph";
 import type { StatusColors } from "../shared/settings";
 import { DEFAULT_RUNNING_COLOR } from "../shared/settings";
+import type { AgentNodeMetadata } from "../shared/agent-metadata";
 
 export interface CardMeta {
   parentId: string | null;
@@ -23,6 +24,8 @@ export interface AgentCardProps {
   archived: boolean;
   directoryStatus: AgentRunStatus;
   directoryAttention: boolean;
+  /** 节点元数据(思考强度/速度模式/开发分支),面板层批量拉取;无数据为 null。 */
+  metadata: AgentNodeMetadata | null;
   selected: boolean;
   canOpenAgent: boolean;
   statusColors: StatusColors;
@@ -41,6 +44,16 @@ const STATUS_LABEL: Record<AgentRunStatus, string> = {
   running: "运行中",
   error: "出错",
   closed: "已关闭",
+};
+
+/** 常见思考选项 id 的中文标签;未知 id 原样展示,不冒充默认值。 */
+const THINKING_LABEL: Record<string, string> = {
+  off: "关闭",
+  minimal: "极简",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "超高",
 };
 
 function toneColor(tone: AgentTone, theme: PluginTheme, colors: StatusColors): string {
@@ -66,6 +79,7 @@ export const AgentCard = memo(function AgentCard({
   archived,
   directoryStatus,
   directoryAttention,
+  metadata,
   selected,
   canOpenAgent,
   statusColors,
@@ -185,6 +199,9 @@ export const AgentCard = memo(function AgentCard({
         statusRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 1 },
         statusDot: { width: 7, height: 7, borderRadius: 4 },
         statusText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
+        // 元数据行固定高度,内容缺失时保留占位,卡片高度不随数据抖动
+        metaRow: { flexDirection: "row", alignItems: "center", gap: 4, height: 13 },
+        metaText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
         actions: {
           flexDirection: "row",
           borderTopWidth: 1,
@@ -202,6 +219,14 @@ export const AgentCard = memo(function AgentCard({
 
   const title = live?.title ?? fallbackTitle ?? "未命名 Agent";
   const model = live?.model ?? fallbackModel;
+  // 元数据:思考强度(有效值优先,未知 id 原样展示)与速度模式(descriptor label)同行
+  const thinkingLabel = metadata?.thinking
+    ? (THINKING_LABEL[metadata.thinking.value] ?? metadata.thinking.value)
+    : null;
+  const speedLabel = metadata?.speed?.label ?? null;
+  const metaTopText = [thinkingLabel ? `思考 ${thinkingLabel}` : null, speedLabel]
+    .filter(Boolean)
+    .join(" · ");
   const opacity = archived ? 0.4 : 1;
   const statusLabel = archived
     ? "已归档"
@@ -232,6 +257,23 @@ export const AgentCard = memo(function AgentCard({
         <View style={styles.statusRow}>
           <View style={[styles.statusDot, { backgroundColor: toneHex }]} />
           <Text style={styles.statusText}>{statusLabel}</Text>
+        </View>
+        <View style={styles.metaRow}>
+          {metaTopText ? (
+            <Text style={styles.metaText} numberOfLines={1}>
+              {metaTopText}
+            </Text>
+          ) : null}
+        </View>
+        <View style={styles.metaRow}>
+          {metadata?.branch ? (
+            <>
+              <Icon name="GitBranch" size={11} color={theme.colors.foregroundMuted} />
+              <Text style={styles.metaText} numberOfLines={1}>
+                {metadata.branch}
+              </Text>
+            </>
+          ) : null}
         </View>
       </View>
       <View style={styles.actions}>

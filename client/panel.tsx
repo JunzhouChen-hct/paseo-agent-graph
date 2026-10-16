@@ -12,11 +12,13 @@ import { assignExitOffsets, type Point } from "../shared/edge-geometry";
 import { AgentConsole } from "./console";
 import { CreateAgentPanel } from "./create-agent";
 import { TemplatesView } from "./templates";
+import { useAgentMetadata } from "./agent-metadata";
 
 const CARD_W = 196;
 const CARD_W_COMPACT = 164;
-const CARD_H = 92;
-const CARD_H_COMPACT = 92;
+// 原内容(92) + 两行元数据(思考/速度、分支,约 32) + 一行 workspace 标识的预留余量(16)
+const CARD_H = 140;
+const CARD_H_COMPACT = 140;
 const GAP_X = 26;
 const GAP_Y = 58;
 // 父卡片底部两侧各留的边距:多条边在该范围内分配唯一出线点
@@ -70,6 +72,9 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     () => agents.filter((agent) => showArchived || !agent.archived),
     [agents, showArchived],
   );
+
+  // 节点元数据(思考强度/速度模式/开发分支):批量 RPC + 定期轮询
+  const metadataItems = useAgentMetadata(visible.map((agent) => agent.id));
 
   const parentOf = useMemo(() => {
     const map = new Map<string, string | null>();
@@ -428,6 +433,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                       archived={agent.archived}
                       directoryStatus={agent.status}
                       directoryAttention={agent.requiresAttention}
+                      metadata={metadataItems[agent.id] ?? null}
                       selected={selected === agent.id}
                       canOpenAgent={Boolean(navigation)}
                       statusColors={statusColors}
