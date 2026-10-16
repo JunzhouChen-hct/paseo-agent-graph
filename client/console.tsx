@@ -452,9 +452,10 @@ export function AgentConsole({
 
   const flushPending = useCallback(
     async (forAgentId: string) => {
-      // 锁按 agent 记录:别的 agent 的补发进行中不吞掉本次触发,标记收尾后补跑
+      // 锁被占用(不论是否同 agent)都记补跑:进行中的 flush 遍历的是旧快照,
+      // 不含冲突期间新入队的消息;补跑读最新队列,已发送项(sent:true)被排除不重发
       if (flushingForRef.current !== null) {
-        if (flushingForRef.current !== forAgentId) reflushRef.current = true;
+        reflushRef.current = true;
         return;
       }
       flushingForRef.current = forAgentId;
@@ -483,10 +484,13 @@ export function AgentConsole({
         flushingForRef.current = null;
       }
       void reload();
-      // 补发期间有被跳过的其他 agent 触发:针对当前挂载的 agent 补一轮
+      // 补发期间有被跳过的触发:针对当前挂载的 agent 补一轮(队列无其未发送项则跳过空转)
       if (reflushRef.current) {
         reflushRef.current = false;
-        void flushPending(agentIdRef.current);
+        const currentAgentId = agentIdRef.current;
+        if (pendingQueueRef.current.some((item) => item.agentId === currentAgentId && !item.sent)) {
+          void flushPending(currentAgentId);
+        }
       }
     },
     [paseo, toast, reload],
