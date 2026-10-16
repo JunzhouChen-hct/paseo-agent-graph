@@ -32,6 +32,8 @@ interface PendingMessage {
   text: string;
   /** 是否已发送到 daemon(queue 模式攒在本地待补发时为 false) */
   sent: boolean;
+  /** 归属 agent:面板切换 agent 不重挂载,防止 A 会话排队消息被 flush 误发给 B */
+  agentId: string;
   images?: { data: string; mimeType: string }[];
 }
 
@@ -272,53 +274,64 @@ export function AgentConsole({
     scrollToEnd();
   }, [items.length, scrollToEnd]);
 
-  const handleSend = useCallback(async () => {
-    const text = draft.trim();
-    if (!text && images.length === 0) return;
-    setSending(true);
-    try {
-      const mid = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const imagesPayload =
-        images.length > 0
-          ? images.map((image) => ({ data: image.data, mimeType: image.mimeType }))
-          : undefined;
-      const running = agentLive?.status === "running";
-      // queue 模式 + 运行中:不调 send,消息连图片攒在本地,回合结束后补发
-      if (running && sendBehavior === "queue") {
-        setPendingQueue((current) => [
-          ...current,
-          { mid, text, sent: false, images: imagesPayload },
-        ]);
+  // 统一发送入口:普通消息(handleSend)与 /compact 等斜杠命令(handleCompact)共用同一路径。
+  // SDK 契约:send resolve 即 daemon 已接受(送达);accepted:false 或错误时 reject。
+  // activeTurnBehavior 必须显式传 "steer",缺省时 daemon 会打断当前回合。
+  const submitMessage = useCallback(
+    async (text: string, messageImages?: ClipboardImage[]) => {
+      if (!text && (!messageImages || messageImages.length === 0)) return;
+      setSending(true);
+      try {
+        const mid = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const imagesPayload =
+          messageImages && messageImages.length > 0
+            ? messageImages.map((image) => ({ data: image.data, mimeType: image.mimeType }))
+            : undefined;
+        const running = agentLive?.status === "running";
+        // queue 模式 + 运行中:不调 send,消息连图片攒在本地,回合结束后补发(命令同样排队,不静默丢弃)
+        if (running && sendBehavior === "queue") {
+          setPendingQueue((current) => [
+            ...current,
+            { mid, text, sent: false, agentId, images: imagesPayload },
+          ]);
+          setDraft("");
+          setImages([]);
+          toast.show("已排队,回合结束后自动发送");
+          return;
+        }
+        // 协议限制:activeTurnBehavior 只有 "steer"|"interrupt";queue 是纯客户端编排,不发给 daemon
+        const options: {
+          activeTurnBehavior: "steer";
+          messageId: string;
+          images?: { data: string; mimeType: string }[];
+        } = { activeTurnBehavior: "steer", messageId: mid };
+        if (imagesPayload) options.images = imagesPayload;
+        await paseo.agents.ref(agentId).send(text, options);
         setDraft("");
         setImages([]);
-        toast.show("已排队,回合结束后自动发送");
-        return;
+        // steer 模式 + 运行中:消息已注入当前回合,留在本地排队展示直到 timeline 摘除
+        if (sendBehavior === "steer" && running) {
+          setPendingQueue((current) => [
+            ...current,
+            { mid, text, sent: true, agentId, images: imagesPayload },
+          ]);
+        }
+        toast.show(sendBehavior === "steer" && running ? "已加入队列(引导当前回合)" : "已发送");
+        void reload();
+      } catch (err) {
+        // 失败时 draft/图片未清空,可直接重试;排队消息保持 sent:false 由 flush 重试
+        toast.error(err instanceof Error ? err.message : "发送失败");
+      } finally {
+        setSending(false);
       }
-      // 协议限制:activeTurnBehavior 只有 "steer"|"interrupt";queue 是纯客户端编排,不发给 daemon
-      const options: {
-        activeTurnBehavior: "steer";
-        messageId: string;
-        images?: { data: string; mimeType: string }[];
-      } = { activeTurnBehavior: "steer", messageId: mid };
-      if (imagesPayload) options.images = imagesPayload;
-      await paseo.agents.ref(agentId).send(text, options);
-      setDraft("");
-      setImages([]);
-      // steer 模式 + 运行中:消息已注入当前回合,留在本地排队展示直到 timeline 摘除
-      if (sendBehavior === "steer" && running) {
-        setPendingQueue((current) => [
-          ...current,
-          { mid, text, sent: true, images: imagesPayload },
-        ]);
-      }
-      toast.show(sendBehavior === "steer" && running ? "已加入队列(引导当前回合)" : "已发送");
-      void reload();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "发送失败");
-    } finally {
-      setSending(false);
-    }
-  }, [draft, images, agentId, paseo, toast, reload, agentLive?.status, sendBehavior]);
+    },
+    [agentId, agentLive?.status, paseo, reload, sendBehavior, toast],
+  );
+
+  const handleSend = useCallback(() => submitMessage(draft.trim(), images), [draft, images, submitMessage]);
+
+  // 需求3(context 区域压缩按钮)调用此回调,与手输 /compact 走完全相同的发送/排队路径
+  const handleCompact = useCallback(() => submitMessage("/compact"), [submitMessage]);
 
   const handleAttach = useCallback(async () => {
     const image = await readClipboardImage();
@@ -417,6 +430,15 @@ export function AgentConsole({
   const flushingRef = useRef(false);
   const pendingQueueRef = useRef(pendingQueue);
   pendingQueueRef.current = pendingQueue;
+
+  // 面板切换 agent 不重挂载(无 key):排队消息与状态边沿必须按 agent 归属重置,
+  // 否则 A 会话攒的消息会在 B 会话的回合结束边沿被误发给 B。
+  useEffect(() => {
+    setPendingQueue([]);
+    prevStatusRef.current = agentLive?.status;
+    // agentId 变化时 agentLive 可能还是旧值,下一轮 status 订阅更新会把 prevStatusRef 校准
+  }, [agentId]); // 仅在切换 agent 时重置(故意不依赖 agentLive.status)
+
   useEffect(() => {
     const prev = prevStatusRef.current;
     prevStatusRef.current = agentLive?.status;
@@ -427,8 +449,10 @@ export function AgentConsole({
       if (flushingRef.current) return;
       flushingRef.current = true;
       try {
-        const queued = pendingQueueRef.current.filter((pending) => !pending.sent);
-        for (const pending of queued) {
+        // 只补发归属当前 agent 且未发送的消息;每轮重读队列,agent 切换/摘除后残留项静默跳过
+        for (const pending of [...pendingQueueRef.current]) {
+          if (pending.agentId !== agentId || pending.sent) continue;
+          if (!pendingQueueRef.current.some((item) => item.mid === pending.mid)) continue;
           try {
             await paseo.agents.ref(agentId).send(pending.text, {
               // daemon 对连续多条 steer 自己排队注入,无需客户端再编排
