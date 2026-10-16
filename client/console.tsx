@@ -399,32 +399,6 @@ export function AgentConsole({
     });
   }, []);
 
-  // 压缩上下文:给当前会话发送 /compact。需求4的统一发送入口由 sendCompactRef 注入,
-  // 未注入时走下面的独立最小实现(直接发送,不进 pendingQueue,不改 handleSend/queue 逻辑)。
-  const sendCompactRef = useRef<(() => Promise<void>) | null>(null);
-  const [compacting, setCompacting] = useState(false);
-  const handleCompact = useCallback(async () => {
-    if (compacting) return;
-    setCompacting(true);
-    try {
-      const injected = sendCompactRef.current;
-      if (injected) {
-        await injected();
-        return;
-      }
-      await paseo.agents.ref(agentId).send("/compact", {
-        activeTurnBehavior: "steer",
-        messageId: `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      });
-      toast.show("命令已提交,完成后点刷新查看最新占用");
-      void reload();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "发送 /compact 失败");
-    } finally {
-      setCompacting(false);
-    }
-  }, [compacting, agentId, paseo, toast, reload]);
-
   // 排队消息出现在 timeline 后(回合开始处理)摘掉本地排队标记
   useEffect(() => {
     if (pendingQueue.length === 0) return;
@@ -633,7 +607,7 @@ export function AgentConsole({
           paddingVertical: 3,
           borderRadius: 999,
           backgroundColor: theme.colors.surface2,
-          opacity: compacting ? 0.6 : 1,
+          opacity: sending ? 0.6 : 1,
         },
         attachments: {
           flexDirection: "row",
@@ -688,7 +662,7 @@ export function AgentConsole({
         },
         pickerRowText: { color: theme.colors.foreground, fontSize: 13, flex: 1 },
       }),
-    [theme, compact, height, compacting],
+    [theme, compact, height, sending],
   );
 
   const currentThinking = extras?.thinkingOptions?.options.find(
@@ -917,12 +891,12 @@ export function AgentConsole({
         <Pressable
           style={styles.compactButton}
           onPress={() => void handleCompact()}
-          disabled={compacting}
+          disabled={sending}
           accessibilityRole="button"
           accessibilityLabel="压缩上下文"
         >
           <Icon name="Eraser" size={12} color={theme.colors.foregroundMuted} />
-          <Text style={styles.chipText}>{compacting ? "压缩中…" : "压缩"}</Text>
+          <Text style={styles.chipText}>{sending ? "提交中…" : "压缩"}</Text>
         </Pressable>
       </View>
 
