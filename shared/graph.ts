@@ -112,21 +112,24 @@ export interface RenameSubmitterDeps {
   /** 目标 agent 已不是当前会话:丢弃输入,绝不改错 agent */
   onDiscard(): void;
   isCurrentAgent(agentId: string): boolean;
-  /** pending 变化;置位发生在 await 之前,同步可用于 ref/state */
+  /** 防重入锁权威(组件级 useRef,跨工厂重建共享):检查/置位/释放都在这一个 ref 上,
+   *  工厂不持有私有锁——useMemo 依赖变化会重建闭包,私有锁会丢失在途状态 */
+  pendingRef: { current: boolean };
+  /** pending 变化,仅驱动 UI state;ref 的置位/释放由工厂直接负责 */
   onPendingChange(pending: boolean): void;
 }
 
 /**
- * 创建重命名提交器。防重入用闭包内的同步锁(等价 ref):置位发生在首个
- * await 之前、finally 释放——React state 批处理不及时,"快速确认"或
- * onSubmitEditing+按钮同帧两次调用时 state 尚未更新会并发,同步锁必须
- * 先于任何 await 检查并置位。锁存续期间重复调用被直接丢弃。
+ * 创建重命名提交器。防重入权威是 deps.pendingRef(组件级共享 ref):
+ * 置位发生在首个 await 之前、finally 释放——React state 批处理不及时,
+ * "快速确认"或 onSubmitEditing+按钮同帧两次调用时 state 尚未更新会并发,
+ * 同步锁必须先于任何 await 检查并置位;工厂重建(依赖变化)也读写同一
+ * ref,不会丢锁。锁存续期间重复调用被直接丢弃。
  * 纯依赖注入,client 组件与测试共用同一份提交路径。
  */
 export function createRenameSubmitter(deps: RenameSubmitterDeps) {
-  let pending = false;
   return async (target: { agentId: string; draft: string } | null): Promise<void> => {
-    if (!target || pending) return;
+    if (!target || deps.pendingRef.current) return;
     const title = sanitizeRenameTitle(target.draft);
     if (!title) {
       deps.onBlank();
@@ -136,7 +139,7 @@ export function createRenameSubmitter(deps: RenameSubmitterDeps) {
       deps.onDiscard();
       return;
     }
-    pending = true; // await 前同步置位
+    deps.pendingRef.current = true; // await 前同步置位
     deps.onPendingChange(true);
     try {
       const result = await deps.renameAgent({ agentId: target.agentId, title });
@@ -145,7 +148,7 @@ export function createRenameSubmitter(deps: RenameSubmitterDeps) {
     } catch (error) {
       deps.onFailure(error instanceof Error ? error.message : "重命名失败");
     } finally {
-      pending = false; // 任何路径都释放
+      deps.pendingRef.current = false; // 任何路径都释放
       deps.onPendingChange(false);
     }
   };

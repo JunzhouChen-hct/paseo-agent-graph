@@ -425,9 +425,9 @@ export function AgentConsole({
   }, []);
 
   // —— 重命名话题 ——
-  // 防重入的同步权威是 renamingRef(state 批处理不及时,"快速确认"或
-  // onSubmitEditing+按钮同帧两次调用时 state 还没更新,会并发);
-  // renaming state 仅驱动 UI 文案与 disabled。两者由提交器统一置位/释放。
+  // 防重入权威是 renamingRef(state 批处理不及时,"快速确认"或
+  // onSubmitEditing+按钮同帧两次调用会并发);renaming state 仅驱动 UI。
+  // 提交器 useMemo 依赖(renameAgent/toast)变化重建时仍读写同一个 ref,不丢锁。
   const renamingRef = useRef(false);
   const openRename = useCallback(() => {
     if (renamingRef.current) return; // 提交中不开新输入
@@ -448,10 +448,8 @@ export function AgentConsole({
         onSuccess: () => setRename(null),
         onDiscard: () => setRename(null),
         isCurrentAgent: (id) => id === agentIdRef.current,
-        onPendingChange: (pending) => {
-          renamingRef.current = pending; // await 前同步置位,finally 释放
-          setRenaming(pending);
-        },
+        pendingRef: renamingRef,
+        onPendingChange: setRenaming,
       }),
     [renameAgent, toast],
   );

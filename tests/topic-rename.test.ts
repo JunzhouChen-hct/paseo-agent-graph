@@ -33,6 +33,39 @@ function deferredRenameAgent() {
   return { renameAgent, calls, release: (result: { ok: boolean; error: string | null }) => release(result) };
 }
 
+test("提交器:factory 重建(依赖变化)后仍共享同一锁权威,不并发", async () => {
+  const stub = deferredRenameAgent();
+  const pendingRef = { current: false }; // 组件级 useRef 的等价物
+  let pendingTicks = 0;
+  let successes = 0;
+  // useMemo 依赖变化 → 新 factory;两个实例读写同一个 pendingRef
+  const mk = () =>
+    createRenameSubmitter({
+      renameAgent: stub.renameAgent,
+      onBlank: () => assert.fail("不应走空白分支"),
+      onFailure: () => assert.fail("不应走失败分支"),
+      onSuccess: () => {
+        successes += 1;
+      },
+      onDiscard: () => assert.fail("不应丢弃"),
+      isCurrentAgent: () => true,
+      pendingRef,
+      onPendingChange: (pending) => {
+        if (pending) pendingTicks += 1;
+      },
+    });
+  const target = { agentId: "agent-1", draft: "话题" };
+  const first = mk()(target); // factory A 发起 RPC
+  const second = mk()(target); // factory B:同一共享 ref 上看到锁,被丢弃
+  stub.release({ ok: true, error: null });
+  await first;
+  await second;
+  assert.equal(stub.calls.length, 1, "重建工厂不产生第二次 RPC");
+  assert.equal(successes, 1);
+  assert.equal(pendingTicks, 1);
+  assert.equal(pendingRef.current, false, "完成后锁释放");
+});
+
 test("提交器:同帧并发调用被同步锁丢弃,仅一次 RPC 与一次成功回调", async () => {
   const stub = deferredRenameAgent();
   let successes = 0;
@@ -46,6 +79,7 @@ test("提交器:同帧并发调用被同步锁丢弃,仅一次 RPC 与一次成�
     },
     onDiscard: () => assert.fail("不应丢弃"),
     isCurrentAgent: (id) => id === "agent-1",
+    pendingRef: { current: false },
     onPendingChange: (pending) => {
       if (pending) pendingTicks += 1;
     },
@@ -79,6 +113,7 @@ test("提交器:失败走 onFailure 保留草稿,锁释放后可再次提交", a
     },
     onDiscard: () => assert.fail("不应丢弃"),
     isCurrentAgent: () => true,
+    pendingRef: { current: false },
     onPendingChange: () => {},
   });
   await submitter({ agentId: "agent-1", draft: "话题A" });
@@ -108,6 +143,7 @@ test("提交器:RPC 抛错同样走 onFailure 且锁释放,空白/换 agent 不�
       discarded += 1;
     },
     isCurrentAgent: (id) => id === "agent-1",
+    pendingRef: { current: false },
     onPendingChange: () => {},
   });
   await submitter({ agentId: "agent-1", draft: "话题" });
