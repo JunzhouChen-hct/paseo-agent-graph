@@ -213,7 +213,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
   reportRef.current = useRpc(debugReportRpc);
   useEffect(() => {
     const payload = JSON.stringify({
-      entryVersion: "workspace-button-v2",
+      entryVersion: "workspace-factory-v3",
       workspaceId,
       platform: layout.platform,
       compact: layout.compact,

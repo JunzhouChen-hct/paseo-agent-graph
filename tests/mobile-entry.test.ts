@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { contributeMobileEntry, createWorkspaceGraphPanels, graphPanelTarget, workspaceGraphPanelId } from "../client/mobile-entry";
+import { contributeMobileEntry, createWorkspaceGraphPanels, graphPanelTarget, workspaceGraphPanelId, registerWorkspaceGraphButton } from "../client/mobile-entry";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -125,4 +125,22 @@ test("跨工作区的快捷按钮身份不同，按按钮 ID 分发也不会命�
   assert.deepEqual(opened, ["paseo-project", "gitkrab-project", "paseo-project"]);
   stop();
   assert.equal(actions.size, 0);
+});
+
+
+test("每个按钮通过工厂参数固定目标，外层遍历变量改变不影响回调", () => {
+  const actions: Array<() => void> = [];
+  const opened: string[] = [];
+  const h = harness();
+  h.client.addHeaderButton = (value: any) => {
+    actions.push(value.button.behavior.onPress);
+    return { update() {}, remove() {} };
+  };
+  // 有意复用外层变量，模拟手机日志中出现的末项串位条件。
+  var workspaceId: string;
+  for (workspaceId of ["paseo-project", "gitkrab-project", "weekly-review-project"]) {
+    registerWorkspaceGraphButton(h.client, workspaceId, (id) => opened.push(id));
+  }
+  actions.forEach((press) => press());
+  assert.deepEqual(opened, ["paseo-project", "gitkrab-project", "weekly-review-project"]);
 });

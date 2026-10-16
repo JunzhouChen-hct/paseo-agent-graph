@@ -46,6 +46,35 @@ export function createWorkspaceGraphPanels(
   };
 }
 
+function openWorkspaceGraphFromHeader(
+  client: PluginClientContext,
+  workspaceId: string,
+  openWorkspaceGraph: (workspaceId: string) => void,
+) {
+  void client.rpc(debugReportRpc, { payload: JSON.stringify({
+    event: "graph-header-open", entryVersion: "workspace-factory-v3", workspaceId,
+  }) }).catch(() => undefined);
+  openWorkspaceGraph(workspaceId);
+}
+
+/** 每次调用创建独立的参数作用域，按钮动作不捕获目录遍历变量。
+ * 手机真实日志曾出现所有动作指向目录末项；这里沿用 progress 的工厂绑定方式。 */
+export function registerWorkspaceGraphButton(
+  client: PluginClientContext,
+  workspaceId: string,
+  openWorkspaceGraph: (workspaceId: string) => void,
+) {
+  return client.addHeaderButton({
+    id: workspaceGraphPanelId("open-agent-graph", workspaceId),
+    workspaceId,
+    button: {
+      title: "打开节点图", icon: "Workflow", label: "节点图",
+      // bind 将目标保存到函数绑定参数，不依赖移动端运行时的循环闭包捕获。
+      behavior: { kind: "action", onPress: openWorkspaceGraphFromHeader.bind(null, client, workspaceId, openWorkspaceGraph) },
+    },
+  });
+}
+
 /** 给手机的每个工作区提供快捷入口；只观察目录，不创建工作区或会话。 */
 export function contributeMobileEntry(client: PluginClientContext, openWorkspaceGraph: (workspaceId: string) => void) {
   const buttons = new Map<string, ReturnType<PluginClientContext["addHeaderButton"]>>();
@@ -60,20 +89,7 @@ export function contributeMobileEntry(client: PluginClientContext, openWorkspace
     if (stopped) return;
     for (const id of ids) {
       if (buttons.has(id)) continue;
-      buttons.set(id, client.addHeaderButton({
-        // 手机客户端的动作分发也使用按钮身份；跨工作区不复用同一个 ID。
-        id: workspaceGraphPanelId("open-agent-graph", id), workspaceId: id,
-        button: {
-          title: "打开节点图", icon: "Workflow", label: "节点图",
-          behavior: { kind: "action", onPress: () => {
-            // 仅点击时记录真实目标，便于核对手机是否收到新版入口，不轮询。
-            void client.rpc(debugReportRpc, { payload: JSON.stringify({
-              event: "graph-header-open", entryVersion: "workspace-button-v2", workspaceId: id,
-            }) }).catch(() => undefined);
-            openWorkspaceGraph(id);
-          } },
-        },
-      }));
+      buttons.set(id, registerWorkspaceGraphButton(client, id, openWorkspaceGraph));
     }
     for (const [id, button] of buttons) {
       if (!ids.has(id)) { button.remove(); buttons.delete(id); }
