@@ -221,6 +221,21 @@ export function visibleAgents(agents: DirectoryAgent[], showArchived: boolean): 
   return showArchived ? [...agents] : agents.filter((agent) => !agent.archived);
 }
 
+/**
+ * 解析用于 agent placement join 的当前项目 projectKey。
+ * 关键键域语义:工作区描述符与 agent 目录条目里的 project.projectKey 是同一个
+ * 键域(实测等于 projectId);projects.list 返回的 registry projectKey 可能是
+ * 另一个键域(实测含 host 前缀与路径)。两者不一致时必须优先 placement 键,
+ * registry 键只作兜底——用 registry 键 join 会漏掉全部已归档工作区的节点。
+ * 不假设 projectId === projectKey。
+ */
+export function resolveJoinProjectKey(
+  placementKey: string | null,
+  registryKey: string | null,
+): string | null {
+  return placementKey ?? registryKey;
+}
+
 /** 工作区显示名:标题优先(去空白),名称兜底。 */
 export function workspaceDisplayName(workspace: ProjectWorkspaceInfo): string {
   return workspace.title?.trim() || workspace.name;

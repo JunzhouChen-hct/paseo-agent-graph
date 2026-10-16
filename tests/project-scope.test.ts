@@ -11,6 +11,7 @@ import {
   mergeWorkspacePage,
   replaceAgentsFromSnapshot,
   replaceWorkspacesFromSnapshot,
+  resolveJoinProjectKey,
   toDirectoryAgent,
   truncateWorkspaceLabel,
   visibleAgents,
@@ -252,6 +253,42 @@ test("归档开关:隐藏时过滤归档节点,开启时全量保留(含跨 work
   assert.deepEqual(
     visibleAgents(agents, true).map((agent) => agent.id),
     ["agt_live", "agt_dead_a", "agt_dead_b"],
+  );
+});
+
+test("projectKey 键域不一致:placement 键优先,registry 键仅兜底", () => {
+  // 实测键域:projects.list 的 registry key 含 host 前缀与路径,
+  // 而工作区描述符与 agent placement 的 projectKey 等于 projectId 形态
+  const registryKey = "host:srv_LAHg4X0cYa7k:/home/junzhou_chen/workspace/proj/paseo-agent-graph";
+  const placementKey = "prj_35728d3cf32c98fa";
+  assert.notEqual(registryKey, placementKey, "前提:两来源键域确实可能不一致");
+
+  assert.equal(resolveJoinProjectKey(placementKey, registryKey), placementKey, "placement 键优先");
+  assert.equal(resolveJoinProjectKey(null, registryKey), registryKey, "placement 缺失时 registry 兜底");
+  assert.equal(resolveJoinProjectKey(placementKey, null), placementKey);
+  assert.equal(resolveJoinProjectKey(null, null), null);
+
+  // 回归场景:归档工作区 agent 的 placement key 与当前 workspace 一致,
+  // 但与 registry key 不同——若用 registry key join 会漏掉它
+  const map: AgentDirectoryMap = new Map();
+  applyAgentUpsert(map, entry({ id: "agt_active", workspaceId: "ws_live" }, { projectKey: placementKey }));
+  applyAgentUpsert(
+    map,
+    entry(
+      { id: "agt_58af449c", workspaceId: "wks_d755499566b00baa", archivedAt: "2026-10-16T00:00:00Z" },
+      { projectKey: placementKey, workspaceName: "acceptance-archived" },
+    ),
+  );
+  const activeWs = new Set(["ws_live"]);
+  assert.deepEqual(
+    agentsInProject(map, resolveJoinProjectKey(placementKey, registryKey), activeWs).map((a) => a.id).sort(),
+    ["agt_58af449c", "agt_active"],
+    "正确键域:归档工作区 agent 保留",
+  );
+  assert.deepEqual(
+    agentsInProject(map, registryKey, activeWs).map((agent) => agent.id),
+    ["agt_active"],
+    "错误键域(registry):归档工作区 agent 被漏——这正是 placement 优先要避免的回归",
   );
 });
 

@@ -4,7 +4,7 @@
 
 ## 工作方式
 
-展示范围由 workspace 级升级为 project 级:面板以当前 workspace 的真实 projectId 聚合该项目所有工作区的 agent。项目归属只用真实来源判定——projectKey 由 projects.list 按 projectId 精确解析(工作区描述符的 project.projectKey 作为第二来源),agent 条目按目录 placement 的 project.projectKey 精确匹配,或按 workspaceId 与活跃工作区列表 join;不按 cwd 前缀猜测项目,也不假设 projectId 等于 projectKey。工作区列表来自 workspaces.list 的真实 projectId 过滤订阅,动态新增/移除工作区即时反映。已归档工作区的节点靠 projectKey 命中保留,卡片标识回落到目录 placement 的 workspaceName,归档开关不会因此静默丢节点。project 未解析完成前面板保持加载态,不会先展示全 host 的 agent。
+展示范围由 workspace 级升级为 project 级:面板以当前 workspace 的真实 projectId 聚合该项目所有工作区的 agent。项目归属只用真实来源判定——join 用的 projectKey 以项目工作区描述符的 project.projectKey 为准(与 agent 目录 placement 同一键域),projects.list 返回的 registry key 仅作兜底(实测两者键域可能不同,registry key 可含 host 前缀与路径),agent 条目按 placement 的 project.projectKey 精确匹配,或按 workspaceId 与活跃工作区列表 join;不按 cwd 前缀猜测项目,也不假设 projectId 等于 projectKey。工作区列表来自 workspaces.list 的真实 projectId 过滤订阅,动态新增/移除工作区即时反映。已归档工作区的节点靠 projectKey 命中保留,卡片标识回落到目录 placement 的 workspaceName,归档开关不会因此静默丢节点。project 未解析完成前面板保持加载态,不会先展示全 host 的 agent。
 
 面板通过 agent 目录订阅获取 agent 列表(包括已归档的,归档卡片以半透明显示),全量分页拉取(单页 200,cursor 续拉)。agent 之间的连线来自 Paseo 原生的父子关系(子代理、派生 agent),不需要任何配置。连线两端同时处于运行状态时,线上会出现沿派发方向移动的光点;同一父节点的连线从不同出线点发出，以平滑曲线连接子节点；所有流点位于静态线之上。运行中的卡片仅保留一条呼吸边框。
 
