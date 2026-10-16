@@ -11,6 +11,23 @@ export const cancelAgentRpc = defineRpc({
   output: z.object({ ok: z.boolean(), error: z.string().nullable() }),
 });
 
+/**
+ * 验收"待验收"通知:打开节点面板内置会话时,把 attentionReason==="finished"
+ * 的完成通知清掉转回空闲。SDK PaseoApi 未暴露 clearAgentAttention,由 server
+ * 端直连 daemon 完成;server 会对 daemon 最新快照做 fresh 复核,仅 finished
+ * 关注会被清,permission/error 关注与真实运行状态一律不动。
+ * cleared=false 表示 fresh 检查后无需清(通知已不在/原因不符),并非错误。
+ */
+export const acceptAgentRpc = defineRpc({
+  name: "agent-graph.accept",
+  input: z.object({ agentId: z.string().min(1) }),
+  output: z.object({
+    ok: z.boolean(),
+    cleared: z.boolean(),
+    error: z.string().nullable(),
+  }),
+});
+
 export type AgentRunStatus = "initializing" | "idle" | "running" | "error" | "closed";
 
 /** 运行中动效的专用色:主题 token 里没有紫色,取暗/亮主题下均可读的柔和紫。 */

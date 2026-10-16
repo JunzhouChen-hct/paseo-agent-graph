@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RpcInput } from "@getpaseo/plugin";
-import { cancelAgentRpc, configureAgentRpc, debugReportRpc } from "../shared/graph";
+import { acceptAgentRpc, cancelAgentRpc, configureAgentRpc, debugReportRpc } from "../shared/graph";
 
 interface DaemonLease {
   client: DaemonClient;
@@ -80,6 +80,25 @@ export async function handleCancel({ agentId }: RpcInput<typeof cancelAgentRpc>)
 export async function handleDebugReport({ payload }: RpcInput<typeof debugReportRpc>) {
   console.log("[agent-graph:client]", payload);
   return { ok: true };
+}
+
+/** 验收"待验收":先取 daemon 最新快照 fresh 复核,仅 finished 关注才 clear。
+ *  daemon 的 clear_agent_attention 本身不区分原因,误调会连 permission/error
+ *  一起清掉,因此该检查必须在这里做,不能只信客户端传入时机。 */
+export async function handleAccept({ agentId }: RpcInput<typeof acceptAgentRpc>) {
+  try {
+    const daemon = await acquireDaemon();
+    const result = await daemon.fetchAgent(agentId);
+    const agent = result?.agent;
+    if (!agent?.requiresAttention || agent.attentionReason !== "finished") {
+      return { ok: true, cleared: false, error: null };
+    }
+    await daemon.clearAgentAttention(agentId);
+    return { ok: true, cleared: true, error: null };
+  } catch (error) {
+    lease = null;
+    return { ok: false, cleared: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function handleConfigure({

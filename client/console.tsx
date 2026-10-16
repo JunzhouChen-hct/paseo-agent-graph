@@ -3,7 +3,7 @@ import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 
 import { useAgent, usePaseo, useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
-import { configureAgentRpc } from "../shared/graph";
+import { acceptAgentRpc, configureAgentRpc } from "../shared/graph";
 import { agentGraphSettings } from "../shared/settings";
 import { useAgentTimeline, type AgentExtras, type TimelineView } from "./timeline";
 import { canReadClipboardImage, readClipboardImage, type ClipboardImage } from "./web";
@@ -215,6 +215,7 @@ export function AgentConsole({
   const paseo = usePaseo();
   const toast = useToast();
   const configure = useRpc(configureAgentRpc);
+  const accept = useRpc(acceptAgentRpc);
   const settings = useSettings(agentGraphSettings);
   const settingsValues = settings.status === "ready" ? settings.values : null;
   const sendBehavior = settingsValues?.sendBehavior ?? "steer";
@@ -226,6 +227,8 @@ export function AgentConsole({
     provider: agent.provider,
     status: agent.status,
     title: agent.title,
+    requiresAttention: agent.requiresAttention,
+    attentionReason: agent.attentionReason,
   }));
   const provider = agentLive?.provider;
 
@@ -246,6 +249,9 @@ export function AgentConsole({
   agentIdRef.current = agentId;
   const flushingForRef = useRef<string | null>(null);
   const reflushRef = useRef(false);
+  // 已按迁移沿验收过的标记:上一拍是否处于 finished 关注(PluginAgentSnapshot
+  // 不带通知唯一 id,用状态迁移沿保证同一通知只 ack 一次)
+  const prevFinishedAttentionRef = useRef(false);
   const logRef = useRef<ScrollView>(null);
 
   // pendingQueue 的唯一更新入口:ref 为权威源,同步计算后直接 setState。
@@ -461,9 +467,37 @@ export function AgentConsole({
   useEffect(() => {
     updatePendingQueue(() => []);
     sentMidsRef.current = new Set();
+    prevFinishedAttentionRef.current = false;
     prevStatusRef.current = agentLive?.status;
     // agentId 变化时 agentLive 可能还是旧值,下一轮 status 订阅更新会把 prevStatusRef 校准
   }, [agentId, updatePendingQueue]); // 仅在切换 agent 时重置(故意不依赖 agentLive.status)
+
+  // 打开内置会话即验收"待验收":仅 finished(上回合完成通知)按"非 finished → finished"
+  // 迁移沿触发一次验收 RPC;permission/error 关注与真实运行状态不动;server 端还会对
+  // daemon 最新快照 fresh 复核后才 clear。边界:
+  // - 打开时会话已 finished:挂载后首个快照即构成迁移沿(prev=false)
+  // - 打开后 running→finished:状态迁移触发;持续 finished 不重复
+  // - 会话切换:agentId effect 重置迁移沿,旧会话通知不受影响
+  // - 失败:不自动重试(toast 提示),重开面板或出现新的 finished 通知时再验收
+  useEffect(() => {
+    const isFinished = !!(agentLive?.requiresAttention && agentLive.attentionReason === "finished");
+    const wasFinished = prevFinishedAttentionRef.current;
+    prevFinishedAttentionRef.current = isFinished;
+    if (!isFinished || wasFinished) return;
+    accept({ agentId })
+      .then((result) => {
+        if (!result.ok) toast.error(result.error ?? "验收失败");
+      })
+      .catch((err: unknown) => {
+        toast.error(err instanceof Error ? err.message : "验收失败");
+      });
+  }, [
+    agentLive?.requiresAttention,
+    agentLive?.attentionReason,
+    agentId,
+    accept,
+    toast,
+  ]);
 
   const flushPending = useCallback(
     async (forAgentId: string) => {
