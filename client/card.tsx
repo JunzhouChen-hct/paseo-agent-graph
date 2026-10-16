@@ -442,7 +442,17 @@ export const AgentCard = memo(function AgentCard({
           <Icon name="Square" size={14} color={tone === "running" ? statusColors.running : theme.colors.border} />
         </Pressable>
         <View style={styles.actionDivider} />
-        <Pressable style={styles.action} onPress={onArchive} disabled={!canArchive} accessibilityLabel="归档">
+        <Pressable
+          style={styles.action}
+          onPress={(event) => {
+            // 阻断冒泡:避免触发卡片 onPress 打开内置会话——打开会话会 ack 掉
+            // finished 关注,可能赶在归档确认之前把待验收清掉
+            event.stopPropagation();
+            onArchive();
+          }}
+          disabled={!canArchive}
+          accessibilityLabel="归档"
+        >
           <Icon name="Archive" size={14} color={canArchive ? theme.colors.foregroundMuted : theme.colors.border} />
         </Pressable>
       </View>

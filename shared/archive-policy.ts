@@ -31,9 +31,15 @@ export function archivePolicy(input: ArchivePolicyInput): ArchivePolicy {
   if (input.archived) {
     return { canArchive: false, requiresConfirm: false, blockedReason: "archived" };
   }
-  // 运行与启动中都不放开;出错/已关闭等非空闲状态同样不放开
-  if (input.status === "running" || input.status === "initializing") {
-    return { canArchive: false, requiresConfirm: false, blockedReason: "running" };
+  // 所有非 idle 状态一律先不放开(运行/启动/出错/已关闭/未知):
+  // 出错/已关闭下即使挂着 finished 关注也不是"待验收可归档"
+  if (input.status !== "idle") {
+    return {
+      canArchive: false,
+      requiresConfirm: false,
+      blockedReason:
+        input.status === "running" || input.status === "initializing" ? "running" : "not_idle",
+    };
   }
   const finishedAttention = input.requiresAttention && input.attentionReason === "finished";
   if (input.requiresAttention && !finishedAttention) {
@@ -48,10 +54,8 @@ export function archivePolicy(input: ArchivePolicyInput): ArchivePolicy {
     // 主Agent待验收:不可归档
     return { canArchive: false, requiresConfirm: false, blockedReason: "attention" };
   }
-  if (input.status === "idle" && !input.requiresAttention) {
-    return { canArchive: true, requiresConfirm: false, blockedReason: null };
-  }
-  return { canArchive: false, requiresConfirm: false, blockedReason: "not_idle" };
+  // idle 且无任何关注:主/子都可直接归档(统一由面板弹窗确认)
+  return { canArchive: true, requiresConfirm: false, blockedReason: null };
 }
 
 /** 弹窗确认后的 fresh 快照复查输入(与协议快照字段对齐;快照缺失传 null)。 */

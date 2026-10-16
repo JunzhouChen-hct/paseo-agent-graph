@@ -275,10 +275,13 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     childFinished: boolean;
   } | null>(null);
   const [archiving, setArchiving] = useState(false);
+  // 归档同步锁:await 前置位、finally 释放;同帧双击/并行触发在此拦截
+  // (archiving state 有渲染延迟,不能作唯一防线),requestArchive 与取消/关闭同样尊重
+  const archivingLockRef = useRef(false);
 
   const requestArchive = useCallback(
     (agentId: string) => {
-      if (archiving) return;
+      if (archiving || archivingLockRef.current) return;
       const dirAgent = agents.find((candidate) => candidate.id === agentId);
       if (!dirAgent || dirAgent.archived) return;
       const meta = metas.get(agentId) ?? null;
@@ -303,7 +306,8 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
 
   const confirmArchive = useCallback(async () => {
     const target = archiveTarget;
-    if (!target || archiving) return;
+    if (!target || archivingLockRef.current) return;
+    archivingLockRef.current = true;
     setArchiving(true);
     try {
       // fresh snapshot 复查:弹窗期间可能开始运行/进入权限等待/被归档
@@ -333,9 +337,16 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       // 失败可恢复:弹窗保留,可直接重试或取消
       toast.error(err instanceof Error ? `归档失败:${err.message}` : "归档失败");
     } finally {
+      archivingLockRef.current = false;
       setArchiving(false);
     }
-  }, [archiveTarget, archiving, paseo, toast]);
+  }, [archiveTarget, paseo, toast]);
+
+  // 取消/关闭:零副作用;同步锁持有期间不允许关闭,避免归档请求在途时弹窗被拆
+  const cancelArchive = useCallback(() => {
+    if (archivingLockRef.current) return;
+    setArchiveTarget(null);
+  }, []);
 
   // 右键/长按卡片复制 Agent ID:copyText 为宿主官方 API,失败明确报错
   const handleCopyId = useCallback(
@@ -658,8 +669,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
         title="确认归档"
         open={archiveTarget !== null}
         onOpenChange={(open) => {
-          // 归档请求进行中锁定弹窗;关闭即取消,零副作用
-          if (!open && !archiving) setArchiveTarget(null);
+          if (!open) cancelArchive();
         }}
       >
         <Modal.Content>
@@ -671,7 +681,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
           <View style={styles.confirmActions}>
             <Pressable
               style={styles.confirmButton}
-              onPress={() => setArchiveTarget(null)}
+              onPress={cancelArchive}
               disabled={archiving}
               accessibilityRole="button"
               accessibilityLabel="取消归档"
