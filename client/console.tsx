@@ -248,6 +248,19 @@ export function AgentConsole({
   const reflushRef = useRef(false);
   const logRef = useRef<ScrollView>(null);
 
+  // pendingQueue 的唯一更新入口:updater 内同步维护 ref,补跑/逐条检查立即可见
+  // 最新 sent 状态(仅 setPendingQueue 要等下次 render 才同步进 ref,补跑会读到旧值重发)
+  const updatePendingQueue = useCallback(
+    (updater: (current: PendingMessage[]) => PendingMessage[]) => {
+      setPendingQueue((current) => {
+        const next = updater(current);
+        pendingQueueRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
   // 会话区高度:配置默认值即最小值,可向上拉大
   const DEFAULT_HEIGHT = Math.min(680, Math.max(200, settingsValues?.consoleHeight ?? 320));
   const MAX_HEIGHT = 680;
@@ -315,7 +328,7 @@ export function AgentConsole({
         }
         // queue 模式 + 运行中:不调 send,消息连图片攒在本地,回合结束后补发
         if (running && sendBehavior === "queue") {
-          setPendingQueue((current) => [
+          updatePendingQueue((current) => [
             ...current,
             { mid, text, sent: false, agentId, images: imagesPayload },
           ]);
@@ -334,7 +347,7 @@ export function AgentConsole({
         sentMidsRef.current.add(mid);
         // steer 模式 + 运行中:消息已注入当前回合,留在本地排队展示直到 timeline 摘除
         if (sendBehavior === "steer" && running) {
-          setPendingQueue((current) => [
+          updatePendingQueue((current) => [
             ...current,
             { mid, text, sent: true, agentId, images: imagesPayload },
           ]);
@@ -405,9 +418,11 @@ export function AgentConsole({
     const arrived = new Set(
       items.filter((item) => item.kind === "user" && item.messageId).map((item) => item.messageId),
     );
-    const remaining = pendingQueue.filter((pending) => !arrived.has(pending.mid));
-    if (remaining.length !== pendingQueue.length) setPendingQueue(remaining);
-  }, [items, pendingQueue]);
+    updatePendingQueue((current) => {
+      const remaining = current.filter((pending) => !arrived.has(pending.mid));
+      return remaining.length === current.length ? current : remaining;
+    });
+  }, [items, pendingQueue, updatePendingQueue]);
 
   // daemon 会把 steer 消息立即写入 timeline,本地 pending 被摘除后消息看起来已"送达"。
   // 这里从 timeline 反推仍在排队的消息:agent 运行中时,最后一条带 messageId 的 user 消息
@@ -444,11 +459,11 @@ export function AgentConsole({
   // 面板切换 agent 不重挂载(无 key):排队消息与状态边沿必须按 agent 归属重置,
   // 否则 A 会话攒的消息会在 B 会话的回合结束边沿被误发给 B。
   useEffect(() => {
-    setPendingQueue([]);
+    updatePendingQueue(() => []);
     sentMidsRef.current = new Set();
     prevStatusRef.current = agentLive?.status;
     // agentId 变化时 agentLive 可能还是旧值,下一轮 status 订阅更新会把 prevStatusRef 校准
-  }, [agentId]); // 仅在切换 agent 时重置(故意不依赖 agentLive.status)
+  }, [agentId, updatePendingQueue]); // 仅在切换 agent 时重置(故意不依赖 agentLive.status)
 
   const flushPending = useCallback(
     async (forAgentId: string) => {
@@ -472,7 +487,9 @@ export function AgentConsole({
               images: pending.images,
             });
             sentMidsRef.current.add(pending.mid);
-            setPendingQueue((current) =>
+            // 同步更新 ref 中的 sent,再经 updatePendingQueue 同步 state:
+            // 补跑/后续条目检查立即看到 sent:true,React 批处理下不会读旧值重发
+            updatePendingQueue((current) =>
               current.map((item) => (item.mid === pending.mid ? { ...item, sent: true } : item)),
             );
           } catch (err) {
