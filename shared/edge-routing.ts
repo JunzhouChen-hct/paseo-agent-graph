@@ -1,8 +1,9 @@
 /**
- * 边避障路由纯逻辑:直连贝塞尔优先;碰撞时先试单拐肘(自由水平通道),
- * 再试绕阻挡簇左侧/右侧的双拐肘;所有候选路径逐段做膨胀矩形碰撞校验,
- * 全部失败退回直连(不比旧基线差)。绕行路径为正交航点 + 原生圆角
- * (buildPathCurve 采样真实圆弧),静态线与流点消费同一份采样。
+ * 边避障路由纯逻辑:直连贝塞尔优先;碰撞时依次尝试单拐肘、
+ * 双拐肘(阻挡簇外沿候选 + 全局极外侧)、局部正交 visibility 网格搜索;
+ * 全部路径逐段做膨胀矩形碰撞校验(含圆角采样后整体复验),
+ * 全部失败退回直连(不比旧基线差)。绕行路径为正交航点 + 原生圆弧圆角,
+ * 静态线与流点消费同一份采样。
  * 不依赖 React / React Native,可被 client 与 tests 共用。
  */
 
@@ -38,16 +39,26 @@ const MIN_STUB = 4;
  * 会撞自身阻挡簇,因此必须再留一份净空。
  */
 const CORRIDOR_CLEARANCE = 2;
-/** 侧向走廊候选上限(局部外沿逐个 + 全局极外侧) */
+/** 侧向走廊候选上限(约束过滤后的外沿 + 全局极外侧) */
 const MAX_SIDE_CANDIDATES = 6;
+/** visibility 网格节点数上限,超出放弃(退回直连) */
+const VISIBILITY_MAX_NODES = 6000;
+/** visibility 局部障碍集的 x 向外扩(px,约一张卡宽 + 裕量) */
+const VISIBILITY_PAD = 260;
 
 export interface PlannedEdgePath {
   /** 路径航点(拐点,首尾为 from/to) */
   waypoints: Point[];
   /** 圆角采样路径;静态线与流点渲染必须消费同一份对象 */
   sampled: SampledPath;
-  /** true = 无碰撞直连贝塞尔(含兜底);false = 绕行路径 */
+  /** true = 直连贝塞尔;false = 绕行路径 */
   direct: boolean;
+  /**
+   * true = 直连但已知与障碍碰撞(所有绕行策略全部失败后的兜底)。
+   * 正常布局下必须为 0;非 0 说明该边会穿过卡片,需要通过 debug
+   * payload 暴露出来诊断,而不是静默画错。
+   */
+  degraded: boolean;
 }
 
 function inflate(rect: ObstacleRect, margin: number): ObstacleRect {
@@ -165,14 +176,15 @@ export function freeYBands(
   return bands.filter(([start, end]) => end - start > 0.5);
 }
 
-/** 从自由带中取通道 y 候选:每带夹取到最接近 desired 的位置,去重限量 */
-function channelCandidates(
-  bands: ReadonlyArray<[number, number]>,
-  desired: number,
-): number[] {
-  const picked: number[] = [];
+/** 从自由带中取通道 y 候选:每带夹取到最接近 desired 的位置,按距 desired 近远排序限量 */
+function channelCandidates(bands: ReadonlyArray<[number, number]>, desired: number): number[] {
+  const all: number[] = [];
   for (const [start, end] of bands) {
-    const y = Math.min(Math.max(desired, start + 0.5), end - 0.5);
+    all.push(Math.min(Math.max(desired, start + 0.5), end - 0.5));
+  }
+  all.sort((a, b) => Math.abs(a - desired) - Math.abs(b - desired));
+  const picked: number[] = [];
+  for (const y of all) {
     if (!picked.some((value) => Math.abs(value - y) < 0.5)) picked.push(y);
     if (picked.length >= MAX_CHANNEL_CANDIDATES) break;
   }
@@ -208,9 +220,10 @@ function tryElbow(
 
 /**
  * 双拐肘绕行:from → (from.x, yA) → (bx, yA) → (bx, yB) → (to.x, yB) → to。
- * bx 候选:阻挡簇逐个外沿 + 全局极外侧(局部外沿外可能还有其他卡片,
- * 不是保证可通的走廊),各候选先检查 bx 竖直走廊,再对 yA/yB 通道
- * 组合整体逐段校验,取总长最短的可行路径。
+ * bx 候选按"阻挡簇约束外沿(就近优先)+ 全局极外侧"生成;全局极外候选
+ * 不受候选数上限影响,始终被尝试。走廊与通道不预剪枝(全跨度检查会
+ * 误杀 yA/yB 实际跨度内可行的情况),全部交由 per 组合的整体校验裁决。
+ * 首个产出可行路径的 bx 即该侧最短(走廊越近路径越短)。
  */
 function tryDoglegSide(
   side: "left" | "right",
@@ -221,33 +234,26 @@ function tryDoglegSide(
   margin: number,
 ): Point[] | null {
   if (blockers.length === 0) return null;
-  const corridorYs = [
-    Math.min(from.y, to.y) - 1,
-    Math.max(from.y, to.y) + 1,
-  ];
+  const constraint =
+    side === "right"
+      ? Math.max(...blockers.map((b) => b.x + b.width), from.x, to.x) + margin + CORRIDOR_CLEARANCE
+      : Math.min(...blockers.map((b) => b.x), from.x, to.x) - margin - CORRIDOR_CLEARANCE;
 
-  // bx 候选:右=各阻挡簇右外沿与全局最右;左=各阻挡簇左外沿与全局最左
-  const bxCandidates: number[] = [];
-  if (side === "right") {
-    const edges = blockers.map((b) => b.x + b.width);
-    edges.push(...obstacles.map((b) => b.x + b.width));
-    bxCandidates.push(...[...new Set(edges)].sort((a, b) => a - b).map((edge) => edge + margin + CORRIDOR_CLEARANCE));
-    bxCandidates.push(Math.max(...obstacles.map((b) => b.x + b.width), from.x, to.x) + margin + CORRIDOR_CLEARANCE);
-  } else {
-    const edges = blockers.map((b) => b.x);
-    edges.push(...obstacles.map((b) => b.x));
-    bxCandidates.push(
-      ...[...new Set(edges)].sort((a, b) => b - a).map((edge) => edge - margin - CORRIDOR_CLEARANCE),
-    );
-    bxCandidates.push(Math.min(...obstacles.map((b) => b.x), from.x, to.x) - margin - CORRIDOR_CLEARANCE);
-  }
-  const seenBx = new Set<number>();
-  const uniqueBx = bxCandidates.filter((bx) => {
-    const key = Math.round(bx * 100) / 100;
-    if (seenBx.has(key) || bx < margin) return false;
-    seenBx.add(key);
-    return true;
-  });
+  // 候选 bx:约束之外的外沿,按远离阻挡簇方向排序;全局极外侧恒在末尾
+  const raw =
+    side === "right"
+      ? [...blockers, ...obstacles].map((b) => b.x + b.width + margin + CORRIDOR_CLEARANCE)
+      : [...blockers, ...obstacles].map((b) => b.x - margin - CORRIDOR_CLEARANCE);
+  const sorted = [...new Set(raw)].sort((a, b) => (side === "right" ? a - b : b - a));
+  const globalBx =
+    side === "right"
+      ? Math.max(...obstacles.map((b) => b.x + b.width), from.x, to.x) + margin + CORRIDOR_CLEARANCE
+      : Math.min(...obstacles.map((b) => b.x), from.x, to.x) - margin - CORRIDOR_CLEARANCE;
+  // 画布左界保护:x < margin 的走廊会被画布裁掉,左绕只在界内有效
+  const near = sorted.filter((bx) =>
+    side === "right" ? bx >= constraint && bx >= margin : bx <= constraint && bx >= margin,
+  );
+  const ordered = globalBx >= margin ? [...near, globalBx] : near;
 
   const yLo = Math.min(from.y, to.y) + MIN_STUB;
   const yHi = Math.max(from.y, to.y) - MIN_STUB;
@@ -258,24 +264,11 @@ function tryDoglegSide(
   const yBDesired = to.y - (downward ? STUB : -STUB);
 
   let best: Point[] | null = null;
-  let bestLength = Infinity;
   let checked = 0;
-  for (const bx of uniqueBx) {
-    if (checked >= MAX_SIDE_CANDIDATES) break;
+  for (const bx of ordered) {
+    // 上限只约束就近候选;末尾的全局极外候选恒被尝试
+    if (bx !== globalBx && checked >= MAX_SIDE_CANDIDATES) break;
     checked += 1;
-    // bx 竖直走廊全程无障碍(端点在膨胀矩形内即算碰撞,向上下各延 1px 保守检查)
-    if (
-      polylineHitsRects(
-        [
-          { x: bx, y: corridorYs[0]! },
-          { x: bx, y: corridorYs[1]! },
-        ],
-        obstacles,
-        margin,
-      ) !== null
-    ) {
-      continue;
-    }
     const yAs = channelCandidates(
       freeYBands(Math.min(from.x, bx), Math.max(from.x, bx), yLo, yHi, obstacles, margin),
       yADesired,
@@ -298,22 +291,181 @@ function tryDoglegSide(
         if (polylineHitsRects(waypoints, obstacles, margin) !== null) continue;
         const sampled = buildPathCurve(waypoints, BYPASS_FILLET_RADIUS);
         if (polylineHitsRects(sampled.points, obstacles, margin) !== null) continue;
-        const length = sampled.total;
-        if (length < bestLength) {
-          bestLength = length;
+        if (best === null || sampled.total < pathLength(best)) {
           best = waypoints;
         }
       }
     }
-    if (best) break; // 已找到该侧最短可行(候选按外沿从近到远,首个成功即该侧最短)
+    if (best) break; // 该侧已得最短可行路径(候选就近优先)
   }
   return best;
 }
 
 /**
+ * 局部正交 visibility 网格搜索:在边的影响范围内,以障碍外沿 ±(裕量+0.5)
+ * 与两端点坐标为候选走廊线,自由格点构图(相邻格点线段无碰撞才连边),
+ * Dijkstra 找最短正交路径;起点只向下出发、终点只从上方进入,
+ * 保证出/入口切线竖直。行带不对齐、简单绕行全部失败时的可靠兜底。
+ */
+function tryVisibilityRoute(
+  from: Point,
+  to: Point,
+  obstacles: readonly ObstacleRect[],
+  margin: number,
+): Point[] | null {
+  const downward = to.y >= from.y;
+  const loX = Math.min(from.x, to.x) - VISIBILITY_PAD;
+  const hiX = Math.max(from.x, to.x) + VISIBILITY_PAD;
+  const loY = Math.min(from.y, to.y);
+  const hiY = Math.max(from.y, to.y);
+  const local = obstacles.filter(
+    (rect) => rect.x + rect.width >= loX && rect.x <= hiX && rect.y + rect.height >= loY && rect.y <= hiY,
+  );
+
+  // 候选走廊:障碍外沿 ±(margin+0.5)(保证 0.5px 在膨胀边界外)与两端点
+  const xs = new Set<number>([from.x, to.x]);
+  const ys = new Set<number>([from.y, to.y]);
+  for (const rect of local) {
+    const leftX = rect.x - margin - 0.5;
+    const rightX = rect.x + rect.width + margin + 0.5;
+    if (leftX >= 0 && leftX >= loX - 50 && leftX <= hiX + 50) xs.add(leftX);
+    if (rightX >= loX - 50 && rightX <= hiX + 50) xs.add(rightX);
+    const topY = rect.y - margin - 0.5;
+    const bottomY = rect.y + rect.height + margin + 0.5;
+    if (topY > loY && topY < hiY) ys.add(topY);
+    if (bottomY > loY && bottomY < hiY) ys.add(bottomY);
+  }
+  const xList = [...xs].sort((a, b) => a - b);
+  const yList = [...ys].sort((a, b) => a - b);
+  if (xList.length * yList.length > VISIBILITY_MAX_NODES) return null;
+
+  const free = (x: number, y: number): boolean =>
+    !local.some(
+      (rect) =>
+        x >= rect.x - margin &&
+        x <= rect.x + rect.width + margin &&
+        y >= rect.y - margin &&
+        y <= rect.y + rect.height + margin,
+    );
+
+  const nx = xList.length;
+  const ny = yList.length;
+  const nodeId = (ix: number, iy: number): number => ix * ny + iy;
+  const indexOf = (list: number[], value: number): number => {
+    const found = list.findIndex((v) => Math.abs(v - value) < 1e-6);
+    return found;
+  };
+
+  const segFree = (a: Point, b: Point): boolean => polylineHitsRects([a, b], local, margin) === null;
+
+  // Dijkstra(小图,简单数组堆即可)
+  const dist = new Map<number, number>();
+  const prev = new Map<number, number>();
+  const visited = new Set<number>();
+  const push = (id: number, d: number) => {
+    const current = dist.get(id);
+    if (current === undefined || d < current) dist.set(id, d);
+  };
+
+  // 种子:from 竖直向下到最近的可行格点(可传递,只连最近一个)
+  const startIx = indexOf(xList, from.x);
+  if (startIx < 0) return null;
+  {
+    const dirY = downward ? 1 : -1;
+    for (let iy = 0; iy < ny; iy++) {
+      const y = yList[iy]!;
+      if ((downward && y <= from.y + MIN_STUB) || (!downward && y >= from.y - MIN_STUB)) continue;
+      if (!free(from.x, y)) continue;
+      if (!segFree(from, { x: from.x, y })) continue;
+      push(nodeId(startIx, iy), Math.abs(y - from.y));
+      break; // 最近即可,更远的经它可达
+    }
+  }
+
+  const heuristic = (ix: number, iy: number): number =>
+    Math.abs(xList[ix]! - to.x) + Math.abs(yList[iy]! - to.y);
+
+  let goalId = -1;
+  while (visited.size < nx * ny) {
+    // 取未访问最小 dist + heuristic(A* 风格)
+    let bestId = -1;
+    let bestKey = Infinity;
+    for (const [id, d] of dist) {
+      if (visited.has(id)) continue;
+      const key = d + heuristic(Math.floor(id / ny), id % ny);
+      if (key < bestKey) {
+        bestKey = key;
+        bestId = id;
+      }
+    }
+    if (bestId < 0) break;
+    visited.add(bestId);
+    const ix = Math.floor(bestId / ny);
+    const iy = bestId % ny;
+    const point: Point = { x: xList[ix]!, y: yList[iy]! };
+
+    // 终点检查:to.x 列上,可从当前点竖直到达 to
+    if (point.x === to.x) {
+      if (segFree(point, to)) {
+        goalId = bestId;
+        break;
+      }
+    }
+
+    // 四方向相邻格点
+    for (const [dIx, dIy] of [
+      [-1, 0],
+      [1, 0],
+      [0, -1],
+      [0, 1],
+    ] as const) {
+      const jx = ix + dIx;
+      const jy = iy + dIy;
+      if (jx < 0 || jx >= nx || jy < 0 || jy >= ny) continue;
+      const nextId = nodeId(jx, jy);
+      if (visited.has(nextId)) continue;
+      const nextPoint: Point = { x: xList[jx]!, y: yList[jy]! };
+      if (!free(nextPoint.x, nextPoint.y)) continue;
+      if (!segFree(point, nextPoint)) continue;
+      const step = Math.abs(nextPoint.x - point.x) + Math.abs(nextPoint.y - point.y);
+      const candidate = (dist.get(bestId) ?? 0) + step;
+      const existing = dist.get(nextId);
+      if (existing === undefined || candidate < existing) {
+        dist.set(nextId, candidate);
+        prev.set(nextId, bestId);
+      }
+    }
+  }
+
+  if (goalId < 0) return null;
+  // 回溯 + 压缩共线航点
+  const gridPoints: Point[] = [];
+  let cursor = goalId;
+  while (cursor >= 0) {
+    gridPoints.unshift({ x: xList[Math.floor(cursor / ny)]!, y: yList[cursor % ny]! });
+    const up = prev.get(cursor);
+    cursor = up === undefined ? -1 : up;
+  }
+  const waypoints: Point[] = [from, ...gridPoints, to];
+  const compressed: Point[] = [];
+  for (const point of waypoints) {
+    const a = compressed[compressed.length - 2];
+    const b = compressed[compressed.length - 1];
+    if (a && b && (a.x === b.x || a.y === b.y) && (b.x === point.x || b.y === point.y) && (a.x === b.x) === (b.x === point.x) && (a.y === b.y) === (b.y === point.y)) {
+      // a→b→point 同轴共线:丢弃中间点 b
+      compressed[compressed.length - 1] = point;
+      continue;
+    }
+    compressed.push(point);
+  }
+  return compressed.length >= 2 ? compressed : null;
+}
+
+/**
  * 规划一条边的路径:
  * 1) 直连贝塞尔逐段碰撞检查,无碰撞直接用;
- * 2) 碰撞时依次尝试单拐肘、右双拐肘、左双拐肘,取总长最短的可行绕行;
+ * 2) 碰撞时依次尝试单拐肘、左/右双拐肘、局部 visibility 网格搜索,
+ *    取采样总长最短的可行绕行;
  * 3) 全部失败退回直连贝塞尔(与旧基线一致,不让边消失或画错)。
  * obstacles 必须不含该边两端各自的卡片(端点在卡片边界上,膨胀后必相交)。
  */
@@ -327,37 +479,42 @@ export function planEdgePath(
   const filletRadius = opts?.filletRadius ?? BYPASS_FILLET_RADIUS;
   const direct = tryDirect(from, to, obstacles, margin);
   if (direct) {
-    return { waypoints: [from, to], sampled: direct, direct: true };
+    return { waypoints: [from, to], sampled: direct, direct: true, degraded: false };
   }
   const curve = buildEdgeCurve(from, to);
   const blockers = obstacles.filter(
     (rect) => polylineHitsRects(curve.points, [rect], margin) !== null,
   );
-  // 候选统一"航点采样 + 圆角路径整体碰撞校验",取采样总长最短者
-  const candidates: Point[][] = [];
-  const elbow = tryElbow(from, to, obstacles, margin);
-  if (elbow) candidates.push(elbow);
-  const right = tryDoglegSide("right", from, to, blockers, obstacles, margin);
-  if (right) candidates.push(right);
-  const left = tryDoglegSide("left", from, to, blockers, obstacles, margin);
-  if (left) candidates.push(left);
-  if (candidates.length === 0) {
-    // 兜底:直连(保持旧行为,不画错不消失;树布局下通道绕行一般总能成功)
-    return { waypoints: [from, to], sampled: curve, direct: true };
-  }
-  let bestWaypoints = candidates[0]!;
-  let bestSampled = buildPathCurve(bestWaypoints, filletRadius);
-  let bestLength = bestSampled.total;
-  for (const waypoints of candidates) {
+  // 圆角会向拐角内侧切入,每个候选都以"圆角采样后整体无碰撞"为准
+  const validate = (waypoints: readonly Point[]): SampledPath | null => {
     const sampled = buildPathCurve(waypoints, filletRadius);
-    if (polylineHitsRects(sampled.points, obstacles, margin) !== null) continue;
-    if (sampled.total < bestLength) {
-      bestLength = sampled.total;
-      bestWaypoints = waypoints;
+    return polylineHitsRects(sampled.points, obstacles, margin) === null ? sampled : null;
+  };
+
+  let bestWaypoints: Point[] | null = null;
+  let bestSampled: SampledPath | null = null;
+  const consider = (waypoints: Point[] | null): void => {
+    if (!waypoints) return;
+    const sampled = validate(waypoints);
+    if (!sampled) return;
+    if (!bestSampled || sampled.total < bestSampled.total) {
       bestSampled = sampled;
+      bestWaypoints = waypoints;
     }
+  };
+
+  consider(tryElbow(from, to, obstacles, margin));
+  consider(tryDoglegSide("right", from, to, blockers, obstacles, margin));
+  consider(tryDoglegSide("left", from, to, blockers, obstacles, margin));
+  if (!bestWaypoints) {
+    consider(tryVisibilityRoute(from, to, obstacles, margin));
   }
-  return { waypoints: bestWaypoints, sampled: bestSampled, direct: false };
+  if (!bestWaypoints || !bestSampled) {
+    // 兜底:直连(与旧基线一致,不画错不消失)。标记 degraded 供上层诊断,
+    // 正常布局下不应出现;非 0 的 degraded 计数必须从 debug payload 暴露。
+    return { waypoints: [from, to], sampled: curve, direct: true, degraded: true };
+  }
+  return { waypoints: bestWaypoints, sampled: bestSampled, direct: false, degraded: false };
 }
 
 /** 多条规划路径的包围盒(用于扩展画布,防止绕行路径被 ScrollView 裁掉) */

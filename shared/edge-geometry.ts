@@ -284,10 +284,11 @@ export function buildFlowInterpolation(path: SampledPath, dotSize: number): Flow
 
 /**
  * 把采样折线转成旋转矩形线段列表。
- * 线段宽度等于弦长(两端不延长):圆头端盖中心恰落在共享端点上,
- * 相邻段在接缝处的并集边界等价于 SVG round join,不会在每个接缝隆起;
- * 路径首尾由首/末段的圆头自然收口。
- * 跳过近零长段(残差被相邻圆头完全覆盖)。
+ * 两端各延长半线宽:圆头端盖的半圆心恰落在线段端点上——相邻段共享端点时,
+ * 两个半圆合成以该端点为心的完整圆盘,即 SVG stroke-linejoin="round" 的
+ * 精确语义,拐角外侧无缺口;若不延长(宽=弦长),半圆心内缩 r,
+ * 直角拐角外侧会出现约 0.4r 的缺口。
+ * 路径首尾由端盖自然收口;跳过近零长段(残差被相邻圆头覆盖)。
  */
 export function buildSegmentViews(path: SampledPath, lineWidth: number): SegmentView[] {
   const views: SegmentView[] = [];
@@ -298,11 +299,12 @@ export function buildSegmentViews(path: SampledPath, lineWidth: number): Segment
     const dy = b.y - a.y;
     const length = Math.hypot(dx, dy);
     if (length < 0.25) continue;
+    const width = length + lineWidth; // 两端各补半线宽,端盖半圆心落在端点上
     const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
     views.push({
-      left: (a.x + b.x) / 2 - length / 2,
+      left: (a.x + b.x) / 2 - width / 2,
       top: (a.y + b.y) / 2 - lineWidth / 2,
-      width: length,
+      width,
       height: lineWidth,
       rotateDeg: angle,
     });

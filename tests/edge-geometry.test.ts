@@ -4,6 +4,7 @@ import {
   assignExitOffsets,
   buildEdgeCurve,
   buildFlowInterpolation,
+  buildPathCurve,
   buildSegmentViews,
   cubicBezierPoint,
   pointAtLength,
@@ -123,7 +124,7 @@ test("buildSegmentViews:首尾段贴合端点,角度有限,零长段被跳过", 
   const first = views[0]!;
   const last = views[views.length - 1]!;
   // 用角度+长度重建首段弦起点/末段弦终点,应精确命中曲线两端
-  // (线段宽度=弦长,无延长;接缝由相邻圆头在共享端点处自然覆盖)
+  // (宽度=弦长+线宽,端盖半圆心恰在端点;弦长=width-2)
   const firstDir = {
     x: Math.cos((first.rotateDeg * Math.PI) / 180),
     y: Math.sin((first.rotateDeg * Math.PI) / 180),
@@ -133,12 +134,12 @@ test("buildSegmentViews:首尾段贴合端点,角度有限,零长段被跳过", 
     y: Math.sin((last.rotateDeg * Math.PI) / 180),
   };
   const firstStart = {
-    x: first.left + first.width / 2 - (firstDir.x * first.width) / 2,
-    y: first.top + first.height / 2 - (firstDir.y * first.width) / 2,
+    x: first.left + first.width / 2 - (firstDir.x * (first.width - 2)) / 2,
+    y: first.top + first.height / 2 - (firstDir.y * (first.width - 2)) / 2,
   };
   const lastEnd = {
-    x: last.left + last.width / 2 + (lastDir.x * last.width) / 2,
-    y: last.top + last.height / 2 + (lastDir.y * last.width) / 2,
+    x: last.left + last.width / 2 + (lastDir.x * (last.width - 2)) / 2,
+    y: last.top + last.height / 2 + (lastDir.y * (last.width - 2)) / 2,
   };
   assert.ok(Math.hypot(firstStart.x - FROM.x, firstStart.y - FROM.y) < 1e-6);
   assert.ok(Math.hypot(lastEnd.x - TO.x, lastEnd.y - TO.y) < 1e-6);
@@ -160,4 +161,82 @@ test("流点插值表覆盖 [0, total]:首尾对应 from/to 偏移", () => {
   const last = flow.outputX.length - 1;
   assert.equal(flow.outputX[last], TO.x - 2.5);
   assert.equal(flow.outputY[last], TO.y - 2.5);
+});
+
+/** 胶囊(圆头线段视图)覆盖判定:视图 = 距弦段 ≤ 线宽/2 的点集 */
+function capsuleCovers(
+  view: { left: number; top: number; width: number; height: number; rotateDeg: number },
+  p: Point,
+  lineWidth: number,
+): boolean {
+  const rad = (view.rotateDeg * Math.PI) / 180;
+  const center = { x: view.left + view.width / 2, y: view.top + view.height / 2 };
+  const dir = { x: Math.cos(rad), y: Math.sin(rad) };
+  const halfChord = (view.width - lineWidth) / 2;
+  const a = { x: center.x - dir.x * halfChord, y: center.y - dir.y * halfChord };
+  const b = { x: center.x + dir.x * halfChord, y: center.y + dir.y * halfChord };
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lengthSq = dx * dx + dy * dy;
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSq;
+  t = Math.min(Math.max(t, 0), 1);
+  return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t)) <= lineWidth / 2 + 1e-9;
+}
+
+function sharpPolyline(points: Point[]) {
+  // filletRadius 0.4 → 半径不足 0.5,拐角原样保留,points 与输入一致
+  return buildPathCurve(points, 0.4);
+}
+
+test("接缝几何:共线两段在共享端点处保持完整线宽(无串珠收缩)", () => {
+  const A: Point = { x: 0, y: 0 };
+  const J: Point = { x: 50, y: 0 };
+  const B: Point = { x: 100, y: 0 };
+  const views = buildSegmentViews(sharpPolyline([A, J, B]), 2);
+  assert.equal(views.length, 2);
+  // 共享端点近旁 ±0.9px(接近半宽 1)必须被覆盖;若宽度=弦长(端盖心内缩),
+  // (50,±0.9) 会落在两胶囊之外形成收缩缺口
+  for (const probe of [
+    { x: 50, y: 0.9 },
+    { x: 50, y: -0.9 },
+    { x: 50, y: 0 },
+  ]) {
+    assert.ok(
+      views.some((view) => capsuleCovers(view, probe, 2)),
+      `点 (${probe.x},${probe.y}) 在接缝处未被覆盖`,
+    );
+  }
+  // 不应超宽:(50,±1.1) 在线外
+  for (const probe of [
+    { x: 50, y: 1.1 },
+    { x: 50, y: -1.1 },
+  ]) {
+    assert.ok(
+      !views.some((view) => capsuleCovers(view, probe, 2)),
+      `点 (${probe.x},${probe.y}) 不应被覆盖`,
+    );
+  }
+});
+
+test("接缝几何:90° 拐角共享点处全向覆盖(round join),外侧无缺口", () => {
+  const A: Point = { x: 0, y: 0 };
+  const J: Point = { x: 50, y: 0 };
+  const B: Point = { x: 50, y: 50 };
+  const views = buildSegmentViews(sharpPolyline([A, J, B]), 2);
+  assert.equal(views.length, 2);
+  // 拐角外侧对角(距 J ≈ 0.99 < r)必须被覆盖;端盖心内缩时该点为缺口
+  const probesCovered = [
+    { x: 50.7, y: -0.7 }, // 外侧对角
+    { x: 50, y: -0.9 }, // 入线外侧
+    { x: 50.9, y: 0 }, // 出线外侧
+    { x: 50, y: 0 },
+  ];
+  for (const probe of probesCovered) {
+    assert.ok(
+      views.some((view) => capsuleCovers(view, probe, 2)),
+      `点 (${probe.x},${probe.y}) 在拐角处未被覆盖`,
+    );
+  }
+  // 内凹侧同样覆盖(圆盘语义)
+  assert.ok(views.some((view) => capsuleCovers(view, { x: 49.3, y: 0.7 }, 2)));
 });

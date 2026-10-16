@@ -146,7 +146,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       if (list) list.push({ id: agent.id, x: childPos.x });
       else byParent.set(parent, [{ id: agent.id, x: childPos.x }]);
     }
-    const list: { fromId: string; toId: string; sampled: SampledPath }[] = [];
+    const list: { fromId: string; toId: string; sampled: SampledPath; direct: boolean; degraded: boolean }[] = [];
     for (const [parentId, children] of byParent) {
       const parentPos = layoutResult.positions.get(parentId);
       if (!parentPos) continue;
@@ -161,7 +161,13 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
         // 两端卡片必须排除:端点位于卡片边界上,膨胀后必相交
         const obstacles = rects.filter((rect) => rect.id !== parentId && rect.id !== child.id);
         const planned = planEdgePath(from, to, obstacles);
-        list.push({ fromId: parentId, toId: child.id, sampled: planned.sampled });
+        list.push({
+          fromId: parentId,
+          toId: child.id,
+          sampled: planned.sampled,
+          direct: planned.direct,
+          degraded: planned.degraded,
+        });
       });
     }
     return list;
@@ -214,6 +220,9 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       canvasH: layoutResult.height,
       positions: layoutResult.positions.size,
       edges: edges.length,
+      edgesRouted: edges.filter((edge) => !edge.direct).length,
+      // 非零即异常:该边穿卡,必须排查(所有绕行策略失败的兜底直连)
+      edgesDegraded: edges.filter((edge) => edge.degraded).length,
       parents: Object.fromEntries(visible.map((agent) => [agent.title ?? agent.id.slice(0, 8), parentOf.get(agent.id) ?? null])),
       coords: Object.fromEntries(visible.map((agent) => {
         const p = layoutResult.positions.get(agent.id);

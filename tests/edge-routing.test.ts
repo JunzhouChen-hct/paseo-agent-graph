@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { computeLayout } from "../client/layout";
 import {
+  assignExitOffsets,
   buildFlowInterpolation,
   buildPathCurve,
   buildSegmentViews,
@@ -324,4 +325,167 @@ test("routeBounds:空路径与负坐标", () => {
   ]);
   assert.equal(bounds.minX, -10);
   assert.equal(bounds.maxX, 30);
+});
+
+// ---------------------------------------------------------------------------
+// 多根深树回归(独立 review 驳回 106f9f0 后固化的场景):
+// 多行 packRows + 深层子树 + 多根,父到远行的边直连必穿前排卡片。
+// 固定 LCG 种子保证 fixture 完全确定,任何路由退化都会被抓住。
+// ---------------------------------------------------------------------------
+
+/** 独立 reviewer 的 30 节点 fixture(含 n0→n8/n0→n27 直连撞 n1 的原始案例) */
+const REVIEWER_PARENTS: Array<[string, string | null]> = [
+  ["n0", null], ["n1", "n0"], ["n2", "n0"], ["n3", "n0"], ["n4", "n0"],
+  ["n5", "n4"], ["n6", "n2"], ["n7", "n6"], ["n8", "n0"], ["n9", "n8"],
+  ["n10", "n8"], ["n11", "n1"], ["n12", "n3"], ["n13", "n10"], ["n14", "n11"],
+  ["n15", "n0"], ["n16", null], ["n17", "n14"], ["n18", "n12"], ["n19", "n11"],
+  ["n20", "n14"], ["n21", "n20"], ["n22", "n2"], ["n23", "n10"], ["n24", "n18"],
+  ["n25", "n20"], ["n26", "n5"], ["n27", "n0"], ["n28", "n9"], ["n29", "n27"],
+];
+
+/** 固定 LCG(与 review 验证一致,不可改,改动会使 fixture 漂移) */
+function lcg(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+/** LCG 生成的多根深树 parents(30 节点,12% 概率成根,父随机取自前驱) */
+function lcgParents(seed: number): Array<[string, string | null]> {
+  const rng = lcg(seed);
+  const parents: Array<[string, string | null]> = [];
+  for (let i = 0; i < 30; i++) {
+    parents.push(["n" + i, i === 0 || rng() < 0.12 ? null : "n" + Math.floor(rng() * i)]);
+  }
+  return parents;
+}
+
+/**
+ * 按面板同款逻辑整图规划(与 client/panel.tsx edges memo 一致):
+ * 障碍=除两端外的全部卡片;exitMargin 24 与面板 EDGE_EXIT_MARGIN 一致。
+ */
+function planGraph(
+  parents: ReadonlyArray<[string, string | null]>,
+  cardW: number,
+  gapX: number,
+  maxRowWidth: number,
+  margin: number,
+) {
+  const cardH = 140;
+  const gapY = 58;
+  const ids = parents.map(([id]) => id);
+  const parentOf = new Map(parents);
+  const layout = computeLayout(ids, parentOf, cardW, cardH, gapX, gapY, maxRowWidth);
+  const rects: ObstacleRect[] = [];
+  for (const [id, position] of layout.positions) {
+    rects.push({ id, x: position.x, y: position.y, width: cardW, height: cardH });
+  }
+  const byParent = new Map<string, { id: string; x: number }[]>();
+  for (const [id, parent] of parents) {
+    if (!parent) continue;
+    const entry = { id, x: layout.positions.get(id)!.x };
+    const list = byParent.get(parent);
+    if (list) list.push(entry);
+    else byParent.set(parent, [entry]);
+  }
+  const edges: Array<{
+    parentId: string;
+    childId: string;
+    planned: ReturnType<typeof planEdgePath>;
+    obstacles: ObstacleRect[];
+  }> = [];
+  for (const [parentId, children] of byParent) {
+    children.sort((a, b) => a.x - b.x || a.id.localeCompare(b.id));
+    const offsets = assignExitOffsets(cardW, children.length, 24);
+    const parentPos = layout.positions.get(parentId)!;
+    children.forEach((child, index) => {
+      const childPos = layout.positions.get(child.id)!;
+      const from = { x: parentPos.x + (offsets[index] ?? cardW / 2), y: parentPos.y + cardH };
+      const to = { x: childPos.x + cardW / 2, y: childPos.y };
+      const obstacles = rects.filter((rect) => rect.id !== parentId && rect.id !== child.id);
+      edges.push({
+        parentId,
+        childId: child.id,
+        planned: planEdgePath(from, to, obstacles, { margin }),
+        obstacles,
+      });
+    });
+  }
+  return { layout, edges };
+}
+
+/** 双裕量断言:给定 margin 规划出的路径在该 margin 下零碰撞且零退化 */
+function assertGraphClear(
+  label: string,
+  parents: ReadonlyArray<[string, string | null]>,
+  cardW: number,
+  gapX: number,
+  maxRowWidth: number,
+  margin: number,
+) {
+  const { edges } = planGraph(parents, cardW, gapX, maxRowWidth, margin);
+  for (const edge of edges) {
+    const hit = polylineHitsRects(edge.planned.sampled.points, edge.obstacles, margin);
+    assert.equal(hit, null, `${label} 边 ${edge.parentId}->${edge.childId} 撞 ${hit}`);
+    assert.equal(edge.planned.degraded, false, `${label} 边 ${edge.parentId}->${edge.childId} 不允许退化直连`);
+  }
+}
+
+test("回归:reviewer 30 节点 fixture,margin 12 与 margin 0 双断言全边无碰撞", () => {
+  for (const margin of [ROUTE_MARGIN, 0]) {
+    assertGraphClear("reviewer-fixture", REVIEWER_PARENTS, 196, 26, 900, margin);
+  }
+  // 原始案例边 n0→n8、n0→n27(直连撞 n1)必须以绕行路径存在,不许退化
+  const routed = planGraph(REVIEWER_PARENTS, 196, 26, 900, ROUTE_MARGIN);
+  for (const childId of ["n8", "n27"]) {
+    const edge = routed.edges.find((e) => e.parentId === "n0" && e.childId === childId);
+    assert.ok(edge, `边 n0->${childId} 应存在`);
+    assert.equal(edge!.planned.degraded, false);
+    assert.equal(edge!.planned.direct, false, `边 n0->${childId} 直连撞 n1,必须绕行`);
+  }
+});
+
+test("回归:LCG 40 seed 多根深树 sweep,双裕量零碰撞零退化(含视图数上界)", () => {
+  let total = 0;
+  let routed = 0;
+  let maxViews = 0;
+  const started = Date.now();
+  for (let seed = 1; seed <= 40; seed++) {
+    const parents = lcgParents(seed);
+    const even = seed % 2 === 0;
+    const cardW = even ? 196 : 164;
+    const gapX = even ? 26 : 18;
+    const maxRowWidth = even ? 900 : 380;
+    for (const margin of [ROUTE_MARGIN, 0]) {
+      const { edges } = planGraph(parents, cardW, gapX, maxRowWidth, margin);
+      for (const edge of edges) {
+        total += 1;
+        if (!edge.planned.direct) routed += 1;
+        const hit = polylineHitsRects(edge.planned.sampled.points, edge.obstacles, margin);
+        assert.equal(
+          hit,
+          null,
+          `seed=${seed} margin=${margin} 边 ${edge.parentId}->${edge.childId} 撞 ${hit}`,
+        );
+        assert.equal(
+          edge.planned.degraded,
+          false,
+          `seed=${seed} margin=${margin} 边 ${edge.parentId}->${edge.childId} 退化直连`,
+        );
+        // 视图数上界:直连 ≤ 24,绕行 ≤ 40(圆角采样 + DP 简化后)
+        const views = buildSegmentViews(edge.planned.sampled, 2).length;
+        maxViews = Math.max(maxViews, views);
+        const bound = edge.planned.direct ? 24 : 40;
+        assert.ok(views <= bound, `seed=${seed} margin=${margin} 边 ${edge.parentId}->${edge.childId} 视图数 ${views} 超上界 ${bound}`);
+      }
+    }
+  }
+  const elapsed = Date.now() - started;
+  // 性能基线(4 核 CI 量级):sweep 为 80 次整图规划(每次 ~29 条边),毫秒级单边
+  assert.ok(elapsed < 60000, `sweep 耗时 ${elapsed}ms 过慢`);
+  console.log(
+    `LCG sweep: ${total} 条边(40 seeds × 双裕量), 绕行 ${routed}, 单边最大视图 ${maxViews}, 耗时 ${elapsed}ms`,
+  );
 });
