@@ -222,6 +222,17 @@ export function visibleAgents(agents: DirectoryAgent[], showArchived: boolean): 
 }
 
 /**
+ * 面板显示范围 = "当前工作区":只保留 workspaceId 匹配的 agent。
+ * 仅影响画布展示;自动发送引擎与绑定候选仍用项目级目录(见 panel 集成)。
+ */
+export function agentsInWorkspace(
+  agents: readonly DirectoryAgent[],
+  workspaceId: string,
+): DirectoryAgent[] {
+  return agents.filter((agent) => agent.workspaceId === workspaceId);
+}
+
+/**
  * 解析用于 agent placement join 的当前项目 projectKey。
  * 关键键域语义:工作区描述符与 agent 目录条目里的 project.projectKey 是同一个
  * 键域(实测等于 projectId);projects.list 返回的 registry projectKey 可能是

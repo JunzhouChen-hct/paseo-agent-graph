@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import {
@@ -10,6 +10,7 @@ import {
 } from "@getpaseo/plugin/client/ui";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { agentGraphSettings } from "../shared/settings";
+import { IDLE_FADE_TIER_LIMIT, type IdleFadeTierConfig } from "../shared/idle-fade";
 
 type Values = {
   hideArchivedByDefault: boolean;
@@ -20,6 +21,7 @@ type Values = {
   attentionColor: string;
   failedColor: string;
   timelineLimit: number;
+  idleFadeTiers: IdleFadeTierConfig[];
 };
 
 const HEX_PATTERN = /^#[0-9a-fA-F]{6}$/;
@@ -118,6 +120,61 @@ export function AgentGraphSettingsScreen({ theme }: PluginSurfaceProps) {
     [save],
   );
 
+  // 空闲档位行内编辑:数字输入连续变化时防抖保存(校验通过才落盘),
+  // 执行时从 stateRef 读最新档位列表,避免连改两档时互相覆盖
+  const debouncedTierField = useCallback(
+    (key: string, raw: string, tierSnapshot: IdleFadeTierConfig, field: "afterMinutes" | "opacity") => {
+      const timersMap = timers.current;
+      const existing = timersMap.get(key);
+      if (existing) clearTimeout(existing);
+      timersMap.set(
+        key,
+        setTimeout(() => {
+          timersMap.delete(key);
+          const current = stateRef.current;
+          if (current.status !== "ready") return;
+          const tiers = [...current.values.idleFadeTiers];
+          // 以调用时的档位快照定位,不用数组下标:防抖期间删除/新增档位会让
+          // 下标漂移,按下标写会把编辑落到错位的无关档位并持久化。
+          // 找不到快照一致的档位(被删除或已被修改)就放弃这次编辑——丢一次
+          // 编辑比写错档位安全。两个完全同值的档位会命中第一个,可接受。
+          const index = tiers.findIndex(
+            (entry) =>
+              entry.afterMinutes === tierSnapshot.afterMinutes &&
+              entry.opacity === tierSnapshot.opacity &&
+              entry.autoArchive === tierSnapshot.autoArchive,
+          );
+          if (index < 0) return;
+          const tier = tiers[index]!;
+          let value: number | null = null;
+          if (field === "afterMinutes") {
+            const minutes = Number.parseInt(raw, 10);
+            // 分钟阈值:1 ~ 30 天,与 schema 上限一致
+            if (Number.isFinite(minutes) && minutes >= 1 && minutes <= 60 * 24 * 30) value = minutes;
+          } else {
+            const percent = Number.parseFloat(raw);
+            // 透明度以百分数输入(0~100),落盘为 0~1
+            if (Number.isFinite(percent) && percent >= 0 && percent <= 100) value = percent / 100;
+          }
+          if (value === null) return;
+          tiers[index] = { ...tier, [field]: value };
+          save({ idleFadeTiers: tiers });
+        }, 450),
+      );
+    },
+    [save],
+  );
+
+  // 档位行级修改(开关/删除/新增)立即保存;同样从 stateRef 取最新列表
+  const mutateTiers = useCallback(
+    (mutate: (tiers: IdleFadeTierConfig[]) => IdleFadeTierConfig[]) => {
+      const current = stateRef.current;
+      if (current.status !== "ready") return;
+      save({ idleFadeTiers: mutate([...current.values.idleFadeTiers]) });
+    },
+    [save],
+  );
+
   const styles = useMemo(
     () =>
       StyleSheet.create({
@@ -156,6 +213,25 @@ export function AgentGraphSettingsScreen({ theme }: PluginSurfaceProps) {
         },
         hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17, paddingHorizontal: 14, paddingTop: 8 },
         errorText: { color: theme.colors.statusDanger, fontSize: 13 },
+        tierRow: {
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 6,
+          flexWrap: "wrap",
+        },
+        tierLabel: { color: theme.colors.foreground, fontSize: 12 },
+        tierInput: { width: 64, paddingVertical: 5, textAlign: "center" },
+        tierAdd: {
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 4,
+          paddingVertical: 6,
+          paddingHorizontal: 8,
+          borderRadius: 8,
+          backgroundColor: theme.colors.surface2,
+          alignSelf: "flex-start",
+        },
+        tierRemove: { padding: 6, marginLeft: "auto" },
       }),
     [theme],
   );
@@ -303,6 +379,87 @@ export function AgentGraphSettingsScreen({ theme }: PluginSurfaceProps) {
                 </View>
               );
             })}
+          </View>
+        </SettingsGroup>
+
+        <SettingsGroup title="空闲淡出">
+          <View style={{ gap: 12 }}>
+            <Text style={styles.colorHint}>
+              卡片空闲超过档位阈值后整卡淡出(背景与文字);运行中/待处理/出错的卡片不淡出。
+              开启"自动归档"的档位会在空闲进入后归档该 agent,归档后不能从面板恢复。
+            </Text>
+            {values.idleFadeTiers.length === 0 ? (
+              <Text style={styles.colorHint}>未配置档位:卡片不会随空闲淡出。</Text>
+            ) : null}
+            {values.idleFadeTiers.map((tier, index) => (
+              <View key={index} style={styles.tierRow}>
+                <Text style={styles.tierLabel}>空闲超过</Text>
+                <TextInput
+                  key={`tier-${index}-minutes-${state.revision}`}
+                  style={[styles.colorInput, styles.tierInput]}
+                  defaultValue={String(tier.afterMinutes)}
+                  keyboardType="numeric"
+                  onChangeText={(text) => debouncedTierField(`tier-${index}-minutes`, text, tier, "afterMinutes")}
+                  placeholder="30"
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                />
+                <Text style={styles.tierLabel}>分钟淡出至</Text>
+                <TextInput
+                  key={`tier-${index}-opacity-${state.revision}`}
+                  style={[styles.colorInput, styles.tierInput]}
+                  defaultValue={String(Math.round(tier.opacity * 100))}
+                  keyboardType="numeric"
+                  onChangeText={(text) => debouncedTierField(`tier-${index}-opacity`, text, tier, "opacity")}
+                  placeholder="60"
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                />
+                <Text style={styles.tierLabel}>%</Text>
+                <Text style={styles.tierLabel}>自动归档</Text>
+                <Switch
+                  value={tier.autoArchive}
+                  onValueChange={(value) =>
+                    mutateTiers((tiers) =>
+                      tiers.map((entry, i) =>
+                        i === index ? { ...entry, autoArchive: value } : entry,
+                      ),
+                    )
+                  }
+                  trackColor={{ true: theme.colors.accent, false: theme.colors.surface2 }}
+                  accessibilityLabel={`空闲 ${tier.afterMinutes} 分钟档位自动归档`}
+                />
+                <Pressable
+                  style={styles.tierRemove}
+                  onPress={() => mutateTiers((tiers) => tiers.filter((_, i) => i !== index))}
+                  accessibilityLabel={`删除空闲 ${tier.afterMinutes} 分钟档位`}
+                >
+                  <Icon name="Trash2" size={14} color={theme.colors.foregroundMuted} />
+                </Pressable>
+              </View>
+            ))}
+            {values.idleFadeTiers.length < IDLE_FADE_TIER_LIMIT ? (
+              <Pressable
+                style={styles.tierAdd}
+                onPress={() =>
+                  mutateTiers((tiers) => [
+                    ...tiers,
+                    {
+                      // 新档位阈值:已有最大阈值的 2 倍(至少 240 分钟),透明度 50%;
+                      // 必须截断到 schema 上限,否则整份保存会被 zod 拒绝且每次添加都失败
+                      afterMinutes: Math.min(
+                        60 * 24 * 30,
+                        Math.max(240, ...tiers.map((t) => t.afterMinutes * 2)),
+                      ),
+                      opacity: 0.5,
+                      autoArchive: false,
+                    },
+                  ])
+                }
+                accessibilityLabel="添加空闲淡出档位"
+              >
+                <Icon name="Plus" size={14} color={theme.colors.foregroundMuted} />
+                <Text style={styles.tierLabel}>添加档位</Text>
+              </Pressable>
+            ) : null}
           </View>
         </SettingsGroup>
 

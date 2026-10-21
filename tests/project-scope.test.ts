@@ -11,6 +11,7 @@ import {
   mergeWorkspacePage,
   replaceAgentsFromSnapshot,
   replaceWorkspacesFromSnapshot,
+  agentsInWorkspace,
   resolveJoinProjectKey,
   toDirectoryAgent,
   truncateWorkspaceLabel,
@@ -23,7 +24,7 @@ import {
   type RawDirectoryEntry,
   type RawWorkspaceDescriptor,
   type WorkspaceMap,
-} from "../shared/project-scope";
+} from "../shared/project-scope.ts";
 
 /** 构造目录原始条目,字段与 protocol AgentSnapshotPayload 中本插件用到的子集一致 */
 function rawAgent(overrides: Partial<RawDirectoryAgent> & { id: string }): RawDirectoryAgent {
@@ -334,4 +335,13 @@ test("创建目标 workspace 必须跟随父 agent,缺失时拒绝而不是回�
   );
   assert.equal(creationTargetWorkspaceId(undefined), null);
   assert.equal(creationTargetWorkspaceId(null), null);
+});
+
+test("agentsInWorkspace:只保留 workspaceId 匹配的 agent,不改入参顺序", () => {
+  const raw = (id: string, workspaceId: string): DirectoryAgent =>
+    toDirectoryAgent({ id, workspaceId, provider: "claude", status: "idle", createdAt: "2026-01-01T00:00:00Z" })!;
+  const agents = [raw("agt_a", "ws_1"), raw("agt_b", "ws_2"), raw("agt_c", "ws_1")];
+  assert.deepEqual(agentsInWorkspace(agents, "ws_1").map((agent) => agent.id), ["agt_a", "agt_c"]);
+  assert.deepEqual(agentsInWorkspace(agents, "ws_missing"), []);
+  assert.deepEqual(agentsInWorkspace([], "ws_1"), []);
 });
