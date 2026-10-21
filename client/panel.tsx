@@ -37,6 +37,7 @@ import { useProjectAgentDirectory, type DirectoryAgent } from "./directory";
 import { computeLayout, type LayoutPosition, type LayoutResult } from "./layout";
 import { AgentCard, type CardMeta } from "./card";
 import { FeedbackPressable } from "./feedback-pressable";
+import { relatedNodeIds, toneOf } from "../shared/graph";
 import { GraphEdgeFlow, GraphEdgeLine } from "./edge";
 import {
   assignExitOffsets,
@@ -69,6 +70,8 @@ const MIN_CANVAS_SCALE = 0.58;
 const GAP_COL = 52;
 /** 列内行距:同列卡片竖直间距,同时是跨列水平通道的通行空间 */
 const GAP_ROW = 26;
+/** 列头统计带高度(画布顶部预留,布局坐标整体下移该值) */
+const COLUMN_HEADER_H = 22;
 // 父卡片右缘上下各留的边距:多条边在该范围内分配唯一出线点
 const EDGE_EXIT_MARGIN = 24;
 /** 任务列表挂载物的避障占位 id:只存在于障碍列表中,不是真实 agent。 */
@@ -138,6 +141,8 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
 
   const [metas, setMetas] = useState<Map<string, CardMeta>>(new Map());
   const [bottomView, setBottomView] = useState<BottomView>({ kind: "none" });
+  // 聚焦预览:悬停的卡片(临时);无悬停时回落到点选的卡片(持续)
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [archivedOverride, setArchivedOverride] = useState<boolean | null>(null);
   const [panelWidth, setPanelWidth] = useState(0);
   // "graph" 为节点图;"templates" 为节点模板管理视图
@@ -242,6 +247,25 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
   );
 
   const agentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
+
+  // 选中聚焦:悬停即预览(移开恢复),点选后保持;相关集合 = 聚焦节点
+  // + 其父(在显示集内)+ 全部传递子孙,其余卡片压暗到 10% 透明度
+  // 悬停置空只清自己的悬停(不覆盖紧邻卡片已上报的悬停)
+  const handleCardHover = useCallback((agentId: string, hovered: boolean) => {
+    setHoveredNodeId((current) => (hovered ? agentId : current === agentId ? null : current));
+  }, []);
+  const focusNodeId = hoveredNodeId ?? (bottomView.kind === "agent" ? bottomView.agentId : null);
+  const relatedNodes = useMemo(
+    () =>
+      focusNodeId
+        ? relatedNodeIds(
+            displayAgents.map((agent) => agent.id),
+            parentOf,
+            focusNodeId,
+          )
+        : null,
+    [focusNodeId, displayAgents, parentOf],
+  );
 
   // —— 任务列表:按真实 projectId 隔离,目标只认持久化的 targetAgentId ——
   const taskDoc = taskSettings.status === "ready" ? taskSettings.values : null;
@@ -380,9 +404,23 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       ],
     ]);
   }, [showTaskCard, taskCollapsed, cardW, taskListCardH]);
+  // 列内置顶排序:运行中的节点排到本列最上方,完成的节点保持相对顺序不动。
+  // 任务列表伪节点跟随目标节点的 rank(同 rank + 稳定排序 ⇒ 始终紧贴目标
+  // 上方),不会在目标运行中被顶到列顶脱钩
+  const layoutRank = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const agent of displayAgents) {
+      map.set(agent.id, statusOf(agent) === "running" ? 0 : 1);
+    }
+    if (showTaskCard && taskTargetAgentId && map.has(taskTargetAgentId)) {
+      map.set(TASK_LIST_NODE_ID, map.get(taskTargetAgentId)!);
+    }
+    return map;
+  }, [displayAgents, statusOf, showTaskCard, taskTargetAgentId]);
   const layoutResult: LayoutResult = useMemo(
-    () => computeLayout(layoutIds, layoutParentOf, cardW, taskCardH, gapCol, gapRow, layoutSizes),
-    [layoutIds, layoutParentOf, layoutSizes, cardW, taskCardH, gapCol, gapRow],
+    () =>
+      computeLayout(layoutIds, layoutParentOf, cardW, taskCardH, gapCol, gapRow, layoutSizes, layoutRank),
+    [layoutIds, layoutParentOf, layoutSizes, layoutRank, cardW, taskCardH, gapCol, gapRow],
   );
   // 根目标挂载带:全部布局坐标右移 taskLeftPad,挂载物恰好从 x=0 开始、
   // 右缘与主 Agent 左缘间距恒定(展开=列距,折叠=8px 视觉粘连)。
@@ -391,11 +429,21 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     if (!showTaskCard || !taskTargetAgentId || !taskTargetIsRoot) return 0;
     return taskCollapsed ? TASK_STUB_SIZE.width + TASK_STUB_GAP : cardW + gapCol;
   }, [showTaskCard, taskTargetAgentId, taskTargetIsRoot, taskCollapsed, cardW, gapCol]);
+  // 列头带:画布顶部预留一行高度,所有布局坐标下移,列头统计(运行中 n/m)
+  // 画在 y=0 的带内,不与任何卡片重叠
   const canvas: LayoutResult = useMemo(() => {
-    if (taskLeftPad === 0) return layoutResult;
+    // padX = 根目标挂载带(可为 0);padY = 列头带(恒定,画布顶行)
+    const padX = taskLeftPad;
+    const padY = COLUMN_HEADER_H;
     const positions = new Map<string, LayoutPosition>();
-    for (const [id, p] of layoutResult.positions) positions.set(id, { x: p.x + taskLeftPad, y: p.y });
-    return { positions, width: layoutResult.width + taskLeftPad, height: layoutResult.height };
+    for (const [id, p] of layoutResult.positions) positions.set(id, { x: p.x + padX, y: p.y + padY });
+    const columns = layoutResult.columns.map((column) => ({ ...column, x: column.x + padX }));
+    return {
+      positions,
+      columns,
+      width: layoutResult.width + padX,
+      height: layoutResult.height + padY,
+    };
   }, [layoutResult, taskLeftPad]);
   // 任务列表挂载槽位:根目标锚定画布最左侧(预留带右缘与主 Agent 左缘间距
   // 恒定:展开 gapCol、折叠 TASK_STUB_GAP,不随其他卡片位置漂移;整树坐标
@@ -1187,6 +1235,13 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
         edgeLayer: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
         cardLayer: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
         cardSlot: { position: "absolute" },
+        columnHeader: {
+          position: "absolute",
+          top: 0,
+          height: COLUMN_HEADER_H,
+          fontSize: 10,
+          lineHeight: 13,
+        },
         placeholder: {
           flex: 1,
           alignItems: "center",
@@ -1481,6 +1536,34 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                 onPress={() => setBottomView({ kind: "none" })}
                 accessibilityLabel="取消选中"
               />
+              {/* 列头统计:每列顶部显示"运行中 n/m"(n=该列运行中,m=该列全部节点) */}
+              {canvas.columns.map((column, index) => {
+                let running = 0;
+                let total = 0;
+                for (const id of column.ids) {
+                  const agent = agentById.get(id);
+                  if (!agent) continue;
+                  total++;
+                  if (statusOf(agent) === "running") running++;
+                }
+                if (total === 0) return null;
+                return (
+                  <Text
+                    key={`col-head:${index}`}
+                    style={[
+                      styles.columnHeader,
+                      {
+                        left: column.x,
+                        width: column.width,
+                        color: running > 0 ? statusColors.running : theme.colors.foregroundMuted,
+                      },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {`运行中 ${running}/${total}`}
+                  </Text>
+                );
+              })}
               <View style={styles.edgeLayer} pointerEvents="none">
                 {/* 主 Agent → 任务列表:灰色虚线,无流光,不进入 edges 避障统计 */}
                 {taskEdge ? (
@@ -1571,6 +1654,8 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                       idleTiers={idleTiers}
                       workspaceLabel={badgeFor(agent)}
                       selected={bottomView.kind === "agent" && bottomView.agentId === agent.id}
+                      dimmed={relatedNodes !== null && !relatedNodes.has(agent.id)}
+                      onHoverChange={handleCardHover}
                       canOpenAgent={Boolean(navigation)}
                       enableLongPressCopy={layout.platform !== "web"}
                       statusColors={statusColors}

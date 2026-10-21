@@ -161,3 +161,84 @@ test("布局:无 sizes 时全部节点统一尺寸(回归)", () => {
   assert.equal(c1.x, W + GAP_COL);
   assert.equal(result.width, 2 * W + GAP_COL);
 });
+
+test("布局:输出逐列信息(列 x/宽/成员顺序),供列头统计消费", () => {
+  const ids = ["r1", "r2", "a1", "a2", "b1"];
+  const parentOf = new Map<string, string | null>([
+    ["r1", null],
+    ["r2", null],
+    ["a1", "r1"],
+    ["a2", "r1"],
+    ["b1", "r2"],
+  ]);
+  const result = computeLayout(ids, parentOf, W, H, GAP_COL, GAP_ROW);
+  assert.equal(result.columns.length, 2);
+  const [col0, col1] = result.columns;
+  assert.equal(col0!.x, 0);
+  assert.deepEqual(col0!.ids, ["r1", "r2"]);
+  assert.equal(col0!.width, W);
+  assert.equal(col1!.x, W + GAP_COL);
+  // 第 2 列成员顺序跟随父列:r1 的子块在前,r2 的子块在后
+  assert.deepEqual(col1!.ids, ["a1", "a2", "b1"]);
+  // positions 覆盖所有输入节点(列信息不丢节点)
+  assert.equal(result.positions.size, ids.length);
+});
+
+test("布局:rank 置顶排序——运行中的节点排到本列最上方,同 rank 保持原序", () => {
+  const ids = ["r1", "r2", "a1", "a2", "b1"];
+  const parentOf = new Map<string, string | null>([
+    ["r1", null],
+    ["r2", null],
+    ["a1", "r1"],
+    ["a2", "r1"],
+    ["b1", "r2"],
+  ]);
+  // a2(第 2 列)与 r2(第 1 列)运行中,应分别排到本列最上方
+  const rank = new Map<string, number>([
+    ["r2", 0],
+    ["a2", 0],
+  ]);
+  const result = computeLayout(ids, parentOf, W, H, GAP_COL, GAP_ROW, undefined, rank);
+  const [col0, col1] = result.columns;
+  assert.deepEqual(col0!.ids, ["r2", "r1"], "第 1 列:运行的 r2 置顶,空闲 r1 保持原序");
+  // 第 2 列先按父列最终顺序重建(子块跟随父:r2 置顶 ⇒ 其子 b1 靠前),
+  // 再 rank 置顶:a2 排到本列最上方,空闲节点保持重建后的相对顺序
+  assert.deepEqual(col1!.ids, ["a2", "b1", "a1"], "第 2 列:运行的 a2 置顶,b1 跟随置顶的父 r2");
+  // 列内依然竖直装箱无重叠
+  for (const column of result.columns) {
+    for (let i = 1; i < column.ids.length; i++) {
+      const above = result.positions.get(column.ids[i - 1]!)!;
+      const below = result.positions.get(column.ids[i]!)!;
+      assert.ok(
+        !overlap(
+          { x: above.x, y: above.y, width: W, height: H },
+          { x: below.x, y: below.y, width: W, height: H },
+        ),
+      );
+    }
+  }
+});
+
+test("布局:伪节点跟随目标 rank——目标运行中时伪节点仍紧贴其上方不脱钩", () => {
+  const ids = ["r1", "tasklist", "t1", "s1"];
+  const parentOf = new Map<string, string | null>([
+    ["r1", null],
+    ["tasklist", "r1"],
+    ["t1", "r1"],
+    ["s1", "r1"],
+  ]);
+  // 目标 t1 运行中(rank 0),伪节点 tasklist 跟随同 rank;
+  // 稳定排序保证伪节点仍插在目标之前(紧贴上方)
+  const rank = new Map<string, number>([
+    ["t1", 0],
+    ["tasklist", 0],
+  ]);
+  const result = computeLayout(ids, parentOf, W, H, GAP_COL, GAP_ROW, undefined, rank);
+  const [col0, col1] = result.columns;
+  assert.deepEqual(col0!.ids, ["r1"]);
+  const col1Ids = col1!.ids;
+  assert.equal(col1Ids.indexOf("tasklist"), col1Ids.indexOf("t1") - 1, "伪节点紧贴目标正上方");
+  const pseudo = result.positions.get("tasklist")!;
+  const target = result.positions.get("t1")!;
+  assert.equal(pseudo.y + H + GAP_ROW, target.y, "伪节点与目标竖直相邻");
+});

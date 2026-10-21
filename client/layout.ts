@@ -7,6 +7,9 @@
  * 孤儿提升为根(父不在图中或纯环节点)的语义与旧版一致:根 = 第 1 列。
  * 支持每节点独立尺寸(sizes):未指定的节点用统一 cardWidth/cardHeight;
  * 列宽取列内最宽节点,窄节点(如任务列表折叠小图标)与同列卡片左对齐。
+ * 支持列内置顶排序(rank):rank 小者排在本列最上方(运行中的节点置顶,
+ * 快速定位活跃节点);未标注的节点排在已标注节点之后,稳定排序保证同
+ * rank 节点相对顺序不变,子块跟随父、伪节点紧贴目标的关系不被排序打破。
  */
 
 export interface LayoutPosition {
@@ -14,8 +17,18 @@ export interface LayoutPosition {
   y: number;
 }
 
+export interface LayoutColumn {
+  /** 列左缘 x 与列宽(列内最宽节点) */
+  x: number;
+  width: number;
+  /** 列内节点 id(最终顺序,子块跟随父、收拢后的顺序) */
+  ids: string[];
+}
+
 export interface LayoutResult {
   positions: Map<string, LayoutPosition>;
+  /** 逐列信息(供列头统计等消费);与 positions 同一坐标系 */
+  columns: LayoutColumn[];
   width: number;
   height: number;
 }
@@ -28,6 +41,7 @@ export function computeLayout(
   gapCol: number,
   gapRow: number,
   sizes?: ReadonlyMap<string, { width: number; height: number }>,
+  rank?: ReadonlyMap<string, number>,
 ): LayoutResult {
   const widthOf = (id: string): number => sizes?.get(id)?.width ?? cardWidth;
   const heightOf = (id: string): number => sizes?.get(id)?.height ?? cardHeight;
@@ -135,6 +149,7 @@ export function computeLayout(
   // 逐列放置:x = 前列最宽节点 + gapCol;列内按最终顺序竖直装箱后向父收拢;
   // 下一列的成员顺序按本列最终顺序重建(子块跟随父,减少交叉)
   let cursorX = 0;
+  const layoutColumns: LayoutColumn[] = [];
   for (let c = 0; c < columns.length; c++) {
     let column = columns[c] ?? [];
     if (c > 0) {
@@ -152,6 +167,18 @@ export function computeLayout(
       columns[c] = ordered;
       column = ordered;
     }
+    // 列内置顶:rank 小者靠前(运行中的节点排到本列最上方);未标注 rank
+    // 的节点沉到已标注节点之后(不置顶)。稳定排序(显式原索引做 tiebreak):
+    // 同 rank 节点保持原相对顺序,子块跟随父、伪节点紧贴目标的关系都不被打破
+    if (rank) {
+      const originalIndex = new Map(column.map((id, index) => [id, index]));
+      column = [...column].sort(
+        (a, b) =>
+          (rank.get(a) ?? Number.POSITIVE_INFINITY) - (rank.get(b) ?? Number.POSITIVE_INFINITY) ||
+          (originalIndex.get(a) ?? 0) - (originalIndex.get(b) ?? 0),
+      );
+      columns[c] = column;
+    }
     let y = 0;
     for (const id of column) {
       mark(id, cursorX, y);
@@ -159,11 +186,13 @@ export function computeLayout(
     }
     pullTowardParents(column, c);
     const columnWidth = column.reduce((max, id) => Math.max(max, widthOf(id)), 0);
+    layoutColumns.push({ x: cursorX, width: columnWidth, ids: [...column] });
     cursorX += columnWidth + gapCol;
   }
 
   return {
     positions,
+    columns: layoutColumns,
     width: Math.max(maxRight, cardWidth),
     height: Math.max(maxBottom, cardHeight),
   };

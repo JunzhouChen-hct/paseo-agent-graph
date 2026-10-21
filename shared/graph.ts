@@ -60,6 +60,52 @@ export function toneOf(input: {
   return "muted";
 }
 
+/**
+ * 选中聚焦:与选中节点相关的节点集合 = 选中者 + 其父(仅当父在显示集内)
+ * + 全部传递子孙(沿父子关系逐层下探)。用于面板把无关卡片压暗。
+ * 环防护:visited 集合保证纯环不死循环;父不在显示集内视为无父(工作区
+ * 范围下父节点被切掉时,子节点按根排布,聚焦只看显示集内部的关系)。
+ */
+export function relatedNodeIds(
+  ids: readonly string[],
+  parentOf: ReadonlyMap<string, string | null>,
+  selectedId: string,
+): Set<string> {
+  const idSet = new Set(ids);
+  const related = new Set<string>();
+  if (!idSet.has(selectedId)) return related;
+  const childrenOf = new Map<string, string[]>();
+  for (const id of ids) {
+    const parent = parentOf.get(id) ?? null;
+    if (parent && idSet.has(parent) && parent !== id) {
+      const list = childrenOf.get(parent);
+      if (list) list.push(id);
+      else childrenOf.set(parent, [id]);
+    }
+  }
+  related.add(selectedId);
+  // 全部传递祖先:沿父链逐级向上(父、祖父……直到根或父不在显示集),
+  // 不只是直接父节点
+  const ancestorSeen = new Set<string>([selectedId]);
+  let cursor = parentOf.get(selectedId) ?? null;
+  while (cursor && idSet.has(cursor) && !ancestorSeen.has(cursor)) {
+    ancestorSeen.add(cursor);
+    related.add(cursor);
+    cursor = parentOf.get(cursor) ?? null;
+  }
+  const stack = [selectedId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    for (const child of childrenOf.get(id) ?? []) {
+      if (!related.has(child)) {
+        related.add(child);
+        stack.push(child);
+      }
+    }
+  }
+  return related;
+}
+
 /** 诊断通道:client 端把面板状态回传给 server 日志,便于排查 UI 问题。 */
 export const debugReportRpc = defineRpc({
   name: "agent-graph.debug-report",

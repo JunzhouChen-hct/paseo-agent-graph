@@ -51,6 +51,10 @@ export interface AgentCardProps {
   /** 该 agent 所属 workspace 的显示标识(项目总览下用于区分跨工作区节点);null 不显示。 */
   workspaceLabel?: string | null;
   selected: boolean;
+  /** 选中聚焦:与聚焦节点无关的卡片压暗到 10% 透明度(悬停预览/点选保持) */
+  dimmed?: boolean;
+  /** 悬停状态上报:面板据此做聚焦预览(悬停即高亮相关节点,移开恢复) */
+  onHoverChange?: (agentId: string, hovered: boolean) => void;
   canOpenAgent: boolean;
   /** 移动端长按补充复制;web 桌面用右键 */
   enableLongPressCopy: boolean;
@@ -133,6 +137,8 @@ export const AgentCard = memo(function AgentCard({
   modelLabels,
   workspaceLabel,
   selected,
+  dimmed = false,
+  onHoverChange,
   canOpenAgent,
   enableLongPressCopy,
   statusColors,
@@ -426,7 +432,9 @@ export const AgentCard = memo(function AgentCard({
     !archived && tone !== "running" && tone !== "attention" && tone !== "failed";
   const idleOpacity =
     fadeEligible && idleTier ? Math.min(1, Math.max(0, idleTier.opacity)) : 1;
-  const opacity = archived ? 0.4 : hovered || selected ? 1 : idleOpacity;
+  // 聚焦压暗优先级最高(悬停预览/点选保持);聚焦节点自身不会 dim(面板的
+  // 相关集合恒含它),悬停换靶时旧卡片由面板重新计算恢复
+  const opacity = dimmed ? 0.1 : archived ? 0.4 : hovered || selected ? 1 : idleOpacity;
   // 运行活动行(借鉴 pase-omo 画板):运行中才轮询 timeline tail 并显示
   // "耗时 · tok/s · progress";其余状态不占行,卡片高度不变
   const running = status === "running" && !archived;
@@ -446,8 +454,14 @@ export const AgentCard = memo(function AgentCard({
   return (
     <Pressable
       onPress={onPress}
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
+      onHoverIn={() => {
+        setHovered(true);
+        onHoverChange?.(agentId, true);
+      }}
+      onHoverOut={() => {
+        setHovered(false);
+        onHoverChange?.(agentId, false);
+      }}
       onLongPress={enableLongPressCopy ? onCopyId : undefined}
       // 桌面右键:RN PointerEvent 继承 MouseEvent.button,2=右键;
       // 阻断冒泡避免触发选中/打开;右键不产生 click,onPress 不会被触发
