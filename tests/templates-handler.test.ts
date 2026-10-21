@@ -4,8 +4,8 @@ import {
   handleCreateTaskFromTemplate,
   handleImportTemplate,
   prevalidateConfigs,
-} from "../server/templates";
-import type { TemplateNodeConfig } from "../shared/template-model";
+} from "../server/templates.ts";
+import type { TemplateNodeConfig } from "../shared/template-model.ts";
 
 /** server handler 的最小 mock PaseoApi:覆盖 handleImportTemplate/handleCreateTaskFromTemplate 用到的面 */
 function makePaseo(opts: {
@@ -23,11 +23,19 @@ function makePaseo(opts: {
   failModes?: string;
   /** 返回错误消息则该次 create 抛错 */
   failCreateAt?: (input: Record<string, unknown>, index: number) => string | null;
+  /** 返回错误消息则该次 send 抛错(仍记录调用,便于断言) */
+  failSendAt?: (agentId: string, text: string, messageId: string | undefined, index: number) => string | null;
 }) {
   const createCalls: Record<string, unknown>[] = [];
-  const sendCalls: { agentId: string; text: string; messageId?: string }[] = [];
+  const sendCalls: {
+    agentId: string;
+    text: string;
+    messageId?: string;
+    activeTurnBehavior?: string;
+  }[] = [];
   const refreshCalls: string[] = [];
   let createIndex = 0;
+  let sendIndex = 0;
   const paseo = {
     workspaces: {
       ref: () => ({
@@ -51,8 +59,17 @@ function makePaseo(opts: {
           const snapshot = opts.snapshots?.[id];
           return snapshot ? { agent: snapshot, project: null } : null;
         },
-        send: async (text: string, sendOpts?: { messageId?: string }) => {
-          sendCalls.push({ agentId: id, text, messageId: sendOpts?.messageId });
+        send: async (text: string, sendOpts?: { messageId?: string; activeTurnBehavior?: string }) => {
+          const index = sendIndex;
+          sendIndex += 1;
+          sendCalls.push({
+            agentId: id,
+            text,
+            messageId: sendOpts?.messageId,
+            activeTurnBehavior: sendOpts?.activeTurnBehavior,
+          });
+          const error = opts.failSendAt?.(id, text, sendOpts?.messageId, index);
+          if (error) throw new Error(error);
         },
       }),
     },
@@ -96,7 +113,7 @@ const OK_PROBE = {
   models: { codex: [{ id: "gpt-5.5", thinkingOptions: [{ id: "high" }] }] },
 };
 
-test("handler 建树:拓扑序创建、父子正确、prompt 最后只发主节点", async () => {
+test("handler 建树:拓扑序创建、父子正确、prompt 最后只发主节点并附名册", async () => {
   const mock = makePaseo({ workspace: { id: "ws1", title: "WS" }, ...OK_PROBE });
   const result = await handleCreateTaskFromTemplate(
     {
@@ -111,6 +128,7 @@ test("handler 建树:拓扑序创建、父子正确、prompt 最后只发主节�
   assert.equal(result.ok, true);
   assert.equal(result.rootAgentId, "agent-1");
   assert.equal(result.createdAgentIds.length, 3);
+  assert.deepEqual(result.sendErrors, []);
   // 顺序:root → a → b;主节点标题=任务标题,子节点标题=模板标题;均无 prompt
   assert.deepEqual(
     mock.createCalls.map((call) => ({
@@ -125,13 +143,20 @@ test("handler 建树:拓扑序创建、父子正确、prompt 最后只发主节�
       { provider: "codex/gpt-5.5", parent: "agent-2", title: "b", idempotencyKey: "agent-graph-templates:r1:b" },
     ],
   );
-  // prompt 只发主节点,且带稳定 messageId
-  assert.deepEqual(mock.sendCalls, [
-    { agentId: "agent-1", text: "hello", messageId: "agent-graph-templates:r1:prompt" },
-  ]);
+  // prompt 只发主节点,末尾自动附子 Agent 名册;带稳定 messageId 与 steer
+  assert.equal(mock.sendCalls.length, 1);
+  const [sent] = mock.sendCalls;
+  assert.equal(sent.agentId, "agent-1");
+  assert.equal(sent.messageId, "agent-graph-templates:r1:prompt");
+  assert.equal(sent.activeTurnBehavior, "steer");
+  assert.ok(sent.text.startsWith("hello\n\n---\n[子 Agent 名册]"));
+  assert.ok(sent.text.includes("agent-2:a(模板节点「a」,待你派发)"));
+  assert.ok(sent.text.includes("agent-3:b(模板节点「b」,待你派发)"));
+  // 主节点自己不进名册
+  assert.ok(!sent.text.includes("agent-1:"));
 });
 
-test("handler 建树:同 runId 重试产生相同幂等 key", async () => {
+test("handler 建树:同 runId 重试产生相同创建与发送幂等 key", async () => {
   const nodes = [node({ key: "root" }), node({ key: "a", parentKey: "root" })];
   const first = makePaseo({ workspace: { id: "ws1" }, ...OK_PROBE });
   const second = makePaseo({ workspace: { id: "ws1" }, ...OK_PROBE });
@@ -142,6 +167,152 @@ test("handler 建树:同 runId 重试产生相同幂等 key", async () => {
     first.createCalls.map((call) => call.idempotencyKey),
     second.createCalls.map((call) => call.idempotencyKey),
   );
+  // 主节点无启动指令/任务 prompt,但存在子 Agent → 兜底名册通知;重试 messageId 相同
+  assert.deepEqual(
+    first.sendCalls.map((call) => call.messageId),
+    second.sendCalls.map((call) => call.messageId),
+  );
+  assert.deepEqual(first.sendCalls.map((call) => call.messageId), ["agent-graph-templates:r9:roster"]);
+});
+
+test("handler 建树:逐节点启动指令按拓扑序发送,主节点任务 prompt 末尾带名册标注", async () => {
+  const mock = makePaseo({ workspace: { id: "ws1", title: "WS" }, ...OK_PROBE });
+  const result = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "总任务",
+      runId: "r1",
+      nodes: [
+        node({ key: "root", prompt: "  root-start  " }),
+        node({ key: "a", parentKey: "root", title: "编码", prompt: "a-start" }),
+        node({ key: "b", parentKey: "root", title: "Review", prompt: "   " }),
+      ],
+    },
+    mock,
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.sendErrors, []);
+  // 拓扑序:先 root 启动指令,再子节点启动指令,最后主节点任务 prompt
+  assert.deepEqual(
+    mock.sendCalls.map((call) => ({ agentId: call.agentId, messageId: call.messageId })),
+    [
+      { agentId: "agent-1", messageId: "agent-graph-templates:r1:prompt:root" },
+      { agentId: "agent-2", messageId: "agent-graph-templates:r1:prompt:a" },
+      { agentId: "agent-1", messageId: "agent-graph-templates:r1:prompt" },
+    ],
+  );
+  // 启动指令 trim 后发送,且全部显式 steer,避免后发消息打断先发指令;
+  // 主节点的启动指令同样搭载名册(此时任务 prompt 也带,双保险不丢)
+  assert.ok(mock.sendCalls[0].text.startsWith("root-start\n\n---\n[子 Agent 名册]"));
+  assert.equal(mock.sendCalls[1].text, "a-start");
+  assert.ok(mock.sendCalls.every((call) => call.activeTurnBehavior === "steer"));
+  // 主节点任务 prompt 带名册:a 已带启动指令(空白 prompt 的 b 视为待派发)
+  const mainText = mock.sendCalls[2].text;
+  assert.ok(mainText.startsWith("总任务\n\n---\n[子 Agent 名册]"));
+  assert.ok(mainText.includes("agent-2:编码(模板节点「a」,已带启动指令)"));
+  assert.ok(mainText.includes("agent-3:Review(模板节点「b」,待你派发)"));
+});
+
+test("handler 建树:主节点无启动指令也无任务 prompt → 兜底名册通知", async () => {
+  const mock = makePaseo({ workspace: { id: "ws1", title: "WS" }, ...OK_PROBE });
+  const result = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "   ",
+      runId: "r1",
+      nodes: [node({ key: "root" }), node({ key: "a", parentKey: "root", title: "编码" })],
+    },
+    mock,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(mock.sendCalls.length, 1);
+  const [sent] = mock.sendCalls;
+  assert.equal(sent.agentId, "agent-1");
+  assert.equal(sent.messageId, "agent-graph-templates:r1:roster");
+  assert.equal(sent.activeTurnBehavior, "steer");
+  assert.ok(sent.text.startsWith("你的子 Agent 已创建并就绪,等待你的安排:"));
+  assert.ok(sent.text.includes("[子 Agent 名册]"));
+  assert.ok(sent.text.includes("agent-2:编码(模板节点「a」,待你派发)"));
+});
+
+test("handler 建树:主节点有启动指令时不再重复发兜底名册", async () => {
+  const mock = makePaseo({ workspace: { id: "ws1", title: "WS" }, ...OK_PROBE });
+  const result = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "",
+      runId: "r1",
+      nodes: [node({ key: "root", prompt: "root-start" }), node({ key: "a", parentKey: "root" })],
+    },
+    mock,
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    mock.sendCalls.map((call) => call.messageId),
+    ["agent-graph-templates:r1:prompt:root"],
+  );
+  // 任务 prompt 为空时,名册搭载在主节点的启动指令上(唯一搭载机会,不能丢)
+  assert.ok(mock.sendCalls[0]!.text.startsWith("root-start\n\n---\n[子 Agent 名册]"));
+  assert.ok(mock.sendCalls[0]!.text.includes("待你派发"));
+});
+
+test("handler 建树:单条发送失败收集 sendErrors、不回滚、任务 prompt 继续发送", async () => {
+  const mock = makePaseo({
+    workspace: { id: "ws1", title: "WS" },
+    ...OK_PROBE,
+    failSendAt: (_agentId, text) => (text === "a-start" ? "send boom" : null),
+  });
+  const result = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "总任务",
+      runId: "r1",
+      nodes: [
+        node({ key: "root" }),
+        node({ key: "a", parentKey: "root", prompt: "a-start" }),
+        node({ key: "b", parentKey: "root" }),
+      ],
+    },
+    mock,
+  );
+  // 树创建成功即 ok;发送失败只通过 sendErrors 暴露
+  assert.equal(result.ok, true);
+  assert.equal(result.createdAgentIds.length, 3);
+  assert.deepEqual(result.sendErrors, [
+    { key: "a", agentId: "agent-2", error: "启动指令发送失败:send boom" },
+  ]);
+  // 失败不回滚,后续主节点任务 prompt(含名册)仍发送
+  assert.equal(mock.sendCalls.length, 2);
+  assert.equal(mock.sendCalls[1].agentId, "agent-1");
+  assert.equal(mock.sendCalls[1].messageId, "agent-graph-templates:r1:prompt");
+  assert.ok(mock.sendCalls[1].text.startsWith("总任务\n\n---\n"));
+});
+
+test("handler 建树:主节点任务 prompt 发送失败同样收集 sendErrors,不改变建树成功", async () => {
+  const mock = makePaseo({
+    workspace: { id: "ws1", title: "WS" },
+    ...OK_PROBE,
+    failSendAt: (_agentId, _text, messageId) => (messageId?.endsWith(":prompt") ? "prompt boom" : null),
+  });
+  const result = await handleCreateTaskFromTemplate(
+    {
+      workspaceId: "ws1",
+      title: "任务",
+      prompt: "总任务",
+      runId: "r1",
+      nodes: [node({ key: "root" }), node({ key: "a", parentKey: "root" })],
+    },
+    mock,
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.sendErrors, [
+    { key: "root", agentId: "agent-1", error: "任务 prompt 发送失败:prompt boom" },
+  ]);
+  assert.equal(result.createdAgentIds.length, 2);
 });
 
 test("handler 建树:模型不在目录 → 预检拒绝,零创建", async () => {

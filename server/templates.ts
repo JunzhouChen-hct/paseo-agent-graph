@@ -1,15 +1,16 @@
 import type { PaseoApi } from "@getpaseo/client";
 import type { RpcInput } from "@getpaseo/plugin";
 import {
+  buildChildRoster,
   buildTemplateFromSnapshots,
   makeIdempotencyKey,
   topoOrder,
   validateTemplateNodes,
   type ImportableAgentSnapshot,
   type TemplateNodeConfig,
-} from "../shared/template-model";
-import { createTaskFromTemplateRpc, importTemplateRpc } from "../shared/templates";
-import { pickSpeedFeature, speedSelectionValid, type RawFeatureDescriptor } from "../shared/provider-speed";
+} from "../shared/template-model.ts";
+import { createTaskFromTemplateRpc, importTemplateRpc } from "../shared/templates.ts";
+import { pickSpeedFeature, speedSelectionValid, type RawFeatureDescriptor } from "../shared/provider-speed.ts";
 
 const PAGE_LIMIT = 200;
 /** 单次 RPC 内最多逐个刷新的快照数,防止超大盘 workspace 拖垮导入 */
@@ -285,7 +286,7 @@ export async function handleImportTemplate(
   return { ...draft, notes: [...notes, ...draft.notes], skippedArchived, truncated };
 }
 
-/** 按模板新建任务:树校验 → 配置预检 → 拓扑序建树(幂等) → 给主节点发首条 prompt */
+/** 按模板新建任务:树校验 → 配置预检 → 拓扑序建树(幂等) → 逐节点启动指令 + 主节点任务 prompt/名册 */
 export async function handleCreateTaskFromTemplate(
   input: RpcInput<typeof createTaskFromTemplateRpc>,
   { paseo }: { paseo: PaseoApi },
@@ -294,7 +295,14 @@ export async function handleCreateTaskFromTemplate(
 
   const tree = validateTemplateNodes(nodes);
   if (!tree.ok) {
-    return { ok: false, rootAgentId: null, createdAgentIds: [], validationErrors: tree.errors, error: null };
+    return {
+      ok: false,
+      rootAgentId: null,
+      createdAgentIds: [],
+      validationErrors: tree.errors,
+      error: null,
+      sendErrors: [],
+    };
   }
   const rootKey = nodes.find((node) => !node.parentKey)?.key ?? null;
 
@@ -306,12 +314,20 @@ export async function handleCreateTaskFromTemplate(
       createdAgentIds: [],
       validationErrors: [],
       error: "workspace 不存在或已归档",
+      sendErrors: [],
     };
   }
 
   const validationErrors = await prevalidateConfigs(paseo, nodes, workspace.workspaceDirectory ?? null);
   if (validationErrors.length > 0) {
-    return { ok: false, rootAgentId: null, createdAgentIds: [], validationErrors, error: null };
+    return {
+      ok: false,
+      rootAgentId: null,
+      createdAgentIds: [],
+      validationErrors,
+      error: null,
+      sendErrors: [],
+    };
   }
 
   const order = topoOrder(nodes);
@@ -322,6 +338,7 @@ export async function handleCreateTaskFromTemplate(
       createdAgentIds: [],
       validationErrors: ["节点拓扑排序失败(存在环或缺失父引用)"],
       error: null,
+      sendErrors: [],
     };
   }
 
@@ -362,6 +379,7 @@ export async function handleCreateTaskFromTemplate(
       createdAgentIds,
       validationErrors: [],
       error: `创建中断(已创建 ${createdAgentIds.length} 个节点):${message}`,
+      sendErrors: [],
     };
   }
 
@@ -373,27 +391,65 @@ export async function handleCreateTaskFromTemplate(
       createdAgentIds,
       validationErrors: [],
       error: "建树完成但未定位到主节点",
+      sendErrors: [],
     };
   }
 
-  // 整树成功后才把首条 prompt 发给主节点;子节点无 prompt 待命
-  const trimmedPrompt = prompt.trim();
-  if (trimmedPrompt) {
+  // 发送阶段:单条失败只收集、不回滚已创建的树;所有 messageId 稳定,同 runId 重试不会重复发送。
+  // 发送会使节点立即开始运行(固定分工语义),故显式 activeTurnBehavior: "steer",避免后发消息打断先发指令。
+  const sendErrors: { key: string; agentId: string; error: string }[] = [];
+  const sendToAgent = async (
+    key: string,
+    agentId: string,
+    text: string,
+    messageId: string,
+    failureLabel: string,
+  ): Promise<void> => {
     try {
-      // 稳定 messageId:同 runId 重试不会重复发送
-      await paseo.agents.ref(rootAgentId).send(trimmedPrompt, {
-        messageId: makeIdempotencyKey(runId, "prompt"),
-      });
+      await paseo.agents.ref(agentId).send(text, { messageId, activeTurnBehavior: "steer" });
     } catch (error) {
-      return {
-        ok: false,
-        rootAgentId,
-        createdAgentIds,
-        validationErrors: [],
-        error: `树已创建,但首条 prompt 发送失败:${errorText(error)}`,
-      };
+      // error 内带上下文,UI 可直接展示"节点「key」的启动指令发送失败:xxx"
+      sendErrors.push({ key, agentId, error: `${failureLabel}:${errorText(error)}` });
+      console.error(`[agent-graph] 按模板创建:节点 ${key}(${agentId})${failureLabel}:`, errorText(error));
     }
+  };
+
+  const mainKey = rootKey ?? "root";
+  const roster = buildChildRoster(nodes, keyToAgent);
+  const rootHasInstruction = Boolean(nodes.find((node) => node.key === rootKey)?.prompt?.trim());
+  const trimmedPrompt = prompt.trim();
+
+  // 1. 按拓扑序逐节点发送启动指令(含主节点);空白指令视同未配置。
+  //    主节点的启动指令同样追加名册:此时若任务 prompt 为空,名册只有这一次搭载机会
+  for (const node of order.order) {
+    const instruction = node.prompt?.trim();
+    if (!instruction) continue;
+    const agentId = keyToAgent.get(node.key);
+    if (!agentId) continue;
+    const withRoster = node.key === rootKey && roster ? `${instruction}${roster}` : instruction;
+    await sendToAgent(node.key, agentId, withRoster, makeIdempotencyKey(runId, `prompt:${node.key}`), "启动指令发送失败");
   }
 
-  return { ok: true, rootAgentId, createdAgentIds, validationErrors: [], error: null };
+  // 2. 最后发送表单里的任务 prompt;存在子 Agent 时把名册追加到消息末尾
+  if (trimmedPrompt) {
+    await sendToAgent(
+      mainKey,
+      rootAgentId,
+      roster ? `${trimmedPrompt}${roster}` : trimmedPrompt,
+      makeIdempotencyKey(runId, "prompt"),
+      "任务 prompt 发送失败",
+    );
+  } else if (!rootHasInstruction && roster) {
+    // 3. 兜底名册通知:主节点既无启动指令也无任务 prompt,但存在子 Agent 时仍要让主 Agent "知道"
+    await sendToAgent(
+      mainKey,
+      rootAgentId,
+      `你的子 Agent 已创建并就绪,等待你的安排:\n${roster}`,
+      makeIdempotencyKey(runId, "roster"),
+      "名册通知发送失败",
+    );
+  }
+
+  // 树创建成功即 ok;发送失败通过 sendErrors 显式返回,由 UI 逐条展示
+  return { ok: true, rootAgentId, createdAgentIds, validationErrors: [], error: null, sendErrors };
 }

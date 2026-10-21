@@ -11,6 +11,7 @@ import {
 } from "../shared/provider-speed";
 import {
   TEMPLATE_MAX_NODES,
+  TEMPLATE_NODE_PROMPT_MAX,
   matchProjectDefault,
   newTemplateId,
   nextNodeKey,
@@ -64,16 +65,24 @@ interface TaskAttempt {
   nodes: TemplateNodeConfig[];
 }
 
+/** 单条消息发送失败(树已创建,不回滚;重试复用幂等 messageId) */
+interface SendError {
+  key: string;
+  agentId: string;
+  error: string;
+}
+
 type TaskState =
   | { kind: "idle" }
   | { kind: "running" }
-  | { kind: "done"; rootAgentId: string; createdCount: number }
+  | { kind: "done"; rootAgentId: string; createdCount: number; sendErrors: SendError[] }
   | {
       kind: "failed";
       error: string | null;
       validationErrors: string[];
       createdAgentIds: { key: string; agentId: string }[];
       rootAgentId: string | null;
+      sendErrors: SendError[];
       attempt: TaskAttempt;
   };
 
@@ -669,6 +678,16 @@ function TemplateEditor({
           backgroundColor: theme.colors.accent ?? theme.colors.surface2,
         },
         nodeBadgeText: { color: theme.colors.accentForeground, fontSize: 10, fontWeight: "700" },
+        promptBadge: {
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 3,
+          paddingHorizontal: 5,
+          paddingVertical: 2,
+          borderRadius: 6,
+          backgroundColor: theme.colors.surface2,
+        },
+        promptBadgeText: { color: theme.colors.foregroundMuted, fontSize: 10 },
         nodeKeyText: { color: theme.colors.foregroundMuted, fontSize: 10, flex: 1 },
         fieldLabel: { color: theme.colors.foregroundMuted, fontSize: 10, fontWeight: "600", marginBottom: 3 },
         titleInput: {
@@ -679,6 +698,18 @@ function TemplateEditor({
           color: theme.colors.foreground,
           fontSize: 12,
         },
+        promptInput: {
+          backgroundColor: theme.colors.surface2,
+          borderRadius: 8,
+          paddingHorizontal: 10,
+          paddingVertical: 7,
+          color: theme.colors.foreground,
+          fontSize: 12,
+          minHeight: 64,
+          maxHeight: 160,
+          textAlignVertical: "top" as const,
+        },
+        charCount: { color: theme.colors.foregroundMuted, fontSize: 10, marginTop: 3, textAlign: "right" },
         removeButton: {
           paddingHorizontal: 8,
           paddingVertical: 4,
@@ -767,6 +798,12 @@ function TemplateEditor({
                     <Text style={styles.nodeBadgeText}>主节点</Text>
                   </View>
                 ) : null}
+                {node.prompt?.trim() ? (
+                  <View style={styles.promptBadge}>
+                    <Icon name="Zap" size={10} color={theme.colors.foregroundMuted} />
+                    <Text style={styles.promptBadgeText}>启动指令</Text>
+                  </View>
+                ) : null}
                 <Text style={styles.nodeKeyText}>#{index + 1} · key {node.key}</Text>
                 {isRoot ? (
                   <Text style={styles.noteText}>主节点不可删除</Text>
@@ -793,6 +830,21 @@ function TemplateEditor({
                   placeholder="节点标题"
                   placeholderTextColor={theme.colors.foregroundMuted}
                 />
+              </View>
+              <View>
+                <Text style={styles.fieldLabel}>启动指令(可选)</Text>
+                <TextInput
+                  style={styles.promptInput}
+                  value={node.prompt ?? ""}
+                  onChangeText={(text) => patchNode(node.key, { prompt: text })}
+                  placeholder="建树成功后立即发送,该 Agent 会立刻开始执行;留空则待命,由主 Agent 派发"
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  multiline
+                  maxLength={TEMPLATE_NODE_PROMPT_MAX}
+                />
+                <Text style={styles.charCount}>
+                  {(node.prompt ?? "").length}/{TEMPLATE_NODE_PROMPT_MAX}
+                </Text>
               </View>
               {isRoot ? null : (
                 <PickerField
@@ -936,8 +988,15 @@ function TaskLauncher({
           },
         ]);
         if (result.ok && result.rootAgentId) {
-          setState({ kind: "done", rootAgentId: result.rootAgentId, createdCount: result.createdAgentIds.length });
-          toast.show("任务树已创建");
+          setState({
+            kind: "done",
+            rootAgentId: result.rootAgentId,
+            createdCount: result.createdAgentIds.length,
+            sendErrors: result.sendErrors,
+          });
+          // 树已创建但个别消息发送失败时,用 toast 先提示,详细错误在下方逐条列出
+          if (result.sendErrors.length > 0) toast.error("任务树已创建,但有消息发送失败,请查看结果");
+          else toast.show("任务树已创建");
         } else {
           setState({
             kind: "failed",
@@ -945,6 +1004,7 @@ function TaskLauncher({
             validationErrors: result.validationErrors,
             createdAgentIds: result.createdAgentIds,
             rootAgentId: result.rootAgentId,
+            sendErrors: result.sendErrors,
             attempt: next,
           });
         }
@@ -959,6 +1019,7 @@ function TaskLauncher({
           validationErrors: [],
           createdAgentIds: [],
           rootAgentId: null,
+          sendErrors: [],
           attempt: next,
         });
       } finally {
@@ -1036,6 +1097,19 @@ function TaskLauncher({
 
   const canLaunch = Boolean(template) && title.trim().length > 0 && !running;
 
+  /** 发送失败逐条列出:树已创建不回滚,messageId 幂等,重试不会重复投递 */
+  const renderSendErrors = (sendErrors: SendError[]) =>
+    sendErrors.length === 0 ? null : (
+      <View style={styles.historyBox}>
+        <Text style={styles.errorText}>以下消息发送失败(树已创建,不会回滚):</Text>
+        {sendErrors.map((entry, index) => (
+          <Text key={index} style={styles.historyText}>
+            • 节点「{entry.key}」的{entry.error}
+          </Text>
+        ))}
+      </View>
+    );
+
   return (
     <View style={styles.root}>
       <ScrollView style={styles.scroll} contentContainerStyle={styles.body}>
@@ -1088,10 +1162,13 @@ function TaskLauncher({
               resetRun();
             }}
             multiline
-            placeholder="整树创建成功后发送给主节点;子节点保持待命"
+            placeholder="整树创建成功后发送给主节点,消息末尾自动附上子 Agent 名册"
             placeholderTextColor={theme.colors.foregroundMuted}
           />
         </View>
+        <Text style={styles.hint}>
+          发送给主 Agent 时会自动附上子 Agent 名册;配置了启动指令的节点会在建树后立即开跑,未配置的节点待命等待派发。
+        </Text>
         <Text style={styles.hint}>
           按模板在当前 workspace 创建整棵 agent 树;所有节点的提供方/模型/思考强度/权限模式/速度会先做真实预检,不支持时明确报错,不会替换配置。
         </Text>
@@ -1118,6 +1195,7 @@ function TaskLauncher({
             <Text style={styles.successText}>
               已创建 {state.createdCount} 个节点,主节点 {state.rootAgentId}
             </Text>
+            {renderSendErrors(state.sendErrors)}
             <FeedbackPressable
               style={styles.secondaryButton}
               hoverStyle={styles.buttonHover}
@@ -1139,6 +1217,7 @@ function TaskLauncher({
                 {error}
               </Text>
             ))}
+            {renderSendErrors(state.sendErrors)}
             {state.createdAgentIds.length > 0 ? (
               <View style={styles.historyBox}>
                 <Text style={styles.historyText}>本次已创建 {state.createdAgentIds.length} 个节点:</Text>
@@ -1519,7 +1598,7 @@ export function TemplatesView({
         })}
 
         <Text style={styles.defaultHint}>
-          模板保存到 host 设置;按模板新建任务会先校验全部配置,再按父子拓扑创建,主节点收到首条 prompt 后整树待命。
+          模板保存到 host 设置;按模板新建任务会先校验全部配置,再按父子拓扑创建:配置了启动指令的节点立即开跑,主节点消息末尾自动附子 Agent 名册。
         </Text>
       </ScrollView>
     </View>

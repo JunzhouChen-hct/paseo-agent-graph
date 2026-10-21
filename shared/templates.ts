@@ -4,7 +4,7 @@ import {
   TEMPLATE_MAX_NODES,
   templateNodeSchema,
   validateTemplateNodes,
-} from "./template-model";
+} from "./template-model.ts";
 
 /**
  * 节点模板专用 host settings 文档(与面板显示设置分离,避免互相影响)。
@@ -116,16 +116,16 @@ export const importTemplateRpc = defineRpc({
   }),
 });
 
-/** 按模板新建任务:先完整预检 provider/model/thinking,再按拓扑序建树,最后给主节点发首条 prompt */
+/** 按模板新建任务:先完整预检 provider/model/thinking,再按拓扑序建树,最后逐节点发送启动指令并给主节点发任务 prompt/名册 */
 export const createTaskFromTemplateRpc = defineRpc({
   name: "agent-graph.templates.create-task",
   input: z.object({
     workspaceId: z.string().min(1),
     /** 任务标题,用作主节点标题 */
     title: z.string().min(1).max(200),
-    /** 首条 prompt;整树创建成功后发给主节点,子节点始终待命 */
+    /** 首条 prompt;整树创建成功后发给主节点,并自动追加子 Agent 名册 */
     prompt: z.string(),
-    /** 重试复用的稳定运行 id,与节点 key 一起派生幂等 key,避免重复创建 */
+    /** 重试复用的稳定运行 id,与节点 key 一起派生幂等 key,避免重复创建/重复发送 */
     runId: z.string().min(1),
     nodes: createTaskNodesSchema,
   }),
@@ -138,5 +138,13 @@ export const createTaskFromTemplateRpc = defineRpc({
     /** provider/model/thinking/mode 预检或树校验失败详情 */
     validationErrors: z.array(z.string()),
     error: z.string().nullable(),
+    /** 发送阶段逐条失败(树已创建,不回滚;messageId 幂等,可安全重试) */
+    sendErrors: z.array(
+      z.object({
+        key: z.string(),
+        agentId: z.string(),
+        error: z.string(),
+      }),
+    ),
   }),
 });

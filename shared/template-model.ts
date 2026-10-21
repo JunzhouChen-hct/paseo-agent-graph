@@ -3,7 +3,7 @@ import {
   explicitSpeedSelection,
   pickSpeedFeature,
   type RawFeatureDescriptor,
-} from "./provider-speed";
+} from "./provider-speed.ts";
 
 /**
  * 节点模板的纯数据模型:Zod 契约、树校验、导入归一化、拓扑排序、默认模板匹配。
@@ -11,11 +11,16 @@ import {
  * 便于单元测试与双端复用。
  */
 
+/** 节点启动指令的最大长度(与任务 prompt 同量级,足够容纳角色说明) */
+export const TEMPLATE_NODE_PROMPT_MAX = 20000;
+
 /** 单个模板节点的配置;key 是模板内唯一标识,parentKey 为 null 表示主节点(根)。 */
 export const templateNodeSchema = z.object({
   key: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/, "key 只能包含字母/数字/下划线/连字符"),
   parentKey: z.string().nullable(),
   title: z.string().max(200),
+  /** 启动指令:建树成功后立即发送给该节点(可选;子 Agent 配置后立即开跑) */
+  prompt: z.string().max(TEMPLATE_NODE_PROMPT_MAX).optional(),
   /** 裸 provider id(如 "codex"),不带 "/model" 后缀 */
   provider: z.string(),
   /** 裸 model id;空串表示未采集/未选择,创建前会被预检拒绝 */
@@ -118,6 +123,39 @@ export function topoOrder(nodes: readonly TemplateNodeConfig[]): {
 /** 创建/重试共用的幂等 key:同一次"按模板新建任务"内每个节点稳定,重试不重复建。 */
 export function makeIdempotencyKey(runId: string, nodeKey: string): string {
   return `agent-graph-templates:${runId}:${nodeKey}`;
+}
+
+/**
+ * 子 Agent 名册:追加到主节点首条消息末尾,让主 Agent 知道有哪些子 Agent、
+ * 如何通过 Paseo MCP 工具调度。nodes 为模板节点,keyToAgent 为建树结果。
+ *
+ * - 只有非根节点且 keyToAgent 中存在其 agentId 的节点进入名册;没有子 Agent 时返回 null。
+ * - 返回值自带 "\n\n---\n" 前缀,调用方直接拼到消息末尾。
+ * - 每行注明该子 Agent 是"已带启动指令自行开跑"还是"待主 Agent 派发"。
+ */
+export function buildChildRoster(
+  nodes: readonly TemplateNodeConfig[],
+  keyToAgent: ReadonlyMap<string, string>,
+): string | null {
+  const lines: string[] = [];
+  for (const node of nodes) {
+    // 主节点自己不是"子 Agent";未创建成功的节点也不进名册
+    if (!node.parentKey) continue;
+    const agentId = keyToAgent.get(node.key);
+    if (!agentId) continue;
+    const title = node.title || "子 Agent";
+    // 空串/纯空白视同未配置启动指令(与服务端 trim 后发送的语义一致)
+    const dispatch = node.prompt?.trim() ? ",已带启动指令" : ",待你派发";
+    lines.push(`- ${agentId}:${title}(模板节点「${node.key}」${dispatch})`);
+  }
+  if (lines.length === 0) return null;
+  return [
+    "",
+    "",
+    "---",
+    "[子 Agent 名册](随任务模板自动创建;通过 Paseo MCP 工具调度:send_agent_prompt 发送任务、get_agent_status 查询状态、cancel_agent 请求停止):",
+    ...lines,
+  ].join("\n");
 }
 
 /** 生成一个未占用的节点 key(编辑器"添加节点"用)。 */
@@ -287,6 +325,7 @@ export function buildTemplateFromSnapshots(
         provider: snap.provider,
         model: snap.model ?? "",
         thinkingOptionId: snap.thinkingOptionId,
+        // 刻意不提取 prompt:live agent 的会话内容不是模板配置,导入后由用户补填启动指令
         ...(snap.modeId ? { modeId: snap.modeId } : {}),
         ...(speed ? { speedFeatureId: speed.id, speedFeatureValue: speed.value } : {}),
       };

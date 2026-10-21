@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   TEMPLATE_MAX_NODES,
+  TEMPLATE_NODE_PROMPT_MAX,
+  buildChildRoster,
   buildTemplateFromSnapshots,
   makeIdempotencyKey,
   matchProjectDefault,
@@ -9,11 +11,12 @@ import {
   normalizeCwd,
   parentOptionsFor,
   projectDefaultKeys,
+  templateNodeSchema,
   topoOrder,
   validateTemplateNodes,
   type ImportableAgentSnapshot,
   type TemplateNodeConfig,
-} from "../shared/template-model";
+} from "../shared/template-model.ts";
 
 function node(overrides: Partial<TemplateNodeConfig> & { key: string }): TemplateNodeConfig {
   return {
@@ -129,6 +132,79 @@ test("幂等 key:同 runId 稳定,不同 runId 隔离", () => {
   assert.equal(makeIdempotencyKey("r1", "n1"), makeIdempotencyKey("r1", "n1"));
   assert.notEqual(makeIdempotencyKey("r1", "n1"), makeIdempotencyKey("r2", "n1"));
   assert.notEqual(makeIdempotencyKey("r1", "n1"), makeIdempotencyKey("r1", "n2"));
+});
+
+test("节点 schema:prompt 可选且上限 20000,旧节点(无 prompt)解析不破", () => {
+  const base = {
+    key: "n1",
+    parentKey: null,
+    title: "节点",
+    provider: "codex",
+    model: "gpt-5.5",
+    thinkingOptionId: null,
+  };
+  const withPrompt = templateNodeSchema.safeParse({ ...base, prompt: "立即执行" });
+  assert.ok(withPrompt.success);
+  if (withPrompt.success) assert.equal(withPrompt.data.prompt, "立即执行");
+
+  // 旧文档没有 prompt 字段:可选字段,解析后为 undefined
+  const old = templateNodeSchema.safeParse(base);
+  assert.ok(old.success);
+  if (old.success) assert.equal(old.data.prompt, undefined);
+
+  // 恰好 20000 通过,超过 1 个字符拒绝
+  assert.ok(templateNodeSchema.safeParse({ ...base, prompt: "x".repeat(TEMPLATE_NODE_PROMPT_MAX) }).success);
+  assert.ok(!templateNodeSchema.safeParse({ ...base, prompt: "x".repeat(TEMPLATE_NODE_PROMPT_MAX + 1) }).success);
+});
+
+test("buildChildRoster:无子 Agent 返回 null", () => {
+  const root = node({ key: "root", prompt: "root-start" });
+  assert.equal(buildChildRoster([root], new Map([["root", "agent-root"]])), null);
+  // 有子节点但建树结果里没有 agentId(创建失败)→ 同样没有可列出的子 Agent
+  assert.equal(
+    buildChildRoster([root, node({ key: "a", parentKey: "root" })], new Map([["root", "agent-root"]])),
+    null,
+  );
+});
+
+test("buildChildRoster:只列有 agentId 的非根节点,并标注是否带启动指令", () => {
+  const nodes = [
+    node({ key: "root", title: "主节点", prompt: "root-start" }),
+    node({ key: "a", parentKey: "root", title: "编码", prompt: "写代码" }),
+    node({ key: "b", parentKey: "root", title: "Review" }),
+    // 空白 prompt 视同未配置
+    node({ key: "c", parentKey: "root", title: "测试", prompt: "   " }),
+    // 建树结果里没有 agentId → 跳过
+    node({ key: "d", parentKey: "root", title: "部署" }),
+  ];
+  const roster = buildChildRoster(
+    nodes,
+    new Map([
+      ["root", "agent-root"],
+      ["a", "agent-a"],
+      ["b", "agent-b"],
+      ["c", "agent-c"],
+    ]),
+  );
+  assert.ok(roster);
+  // 名册自带追加到消息末尾的前缀,且主节点自己不出现在列表中
+  assert.ok(roster!.startsWith("\n\n---\n[子 Agent 名册]"));
+  assert.ok(!roster!.includes("agent-root"));
+  assert.ok(roster!.includes("- agent-a:编码(模板节点「a」,已带启动指令)"));
+  assert.ok(roster!.includes("- agent-b:Review(模板节点「b」,待你派发)"));
+  assert.ok(roster!.includes("- agent-c:测试(模板节点「c」,待你派发)"));
+  assert.ok(!roster!.includes("agent-d"));
+});
+
+test("buildChildRoster:标题为空时回落为「子 Agent」", () => {
+  const roster = buildChildRoster(
+    [node({ key: "root" }), node({ key: "a", parentKey: "root", title: "" })],
+    new Map([
+      ["root", "agent-root"],
+      ["a", "agent-a"],
+    ]),
+  );
+  assert.ok(roster!.includes("- agent-a:子 Agent(模板节点「a」,待你派发)"));
 });
 
 test("nextNodeKey 避让已占用 key", () => {

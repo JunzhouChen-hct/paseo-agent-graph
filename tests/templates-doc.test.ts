@@ -4,9 +4,9 @@ import {
   agentGraphTemplatesSettings,
   mergeDraftIntoDoc,
   validateTemplateDocument,
-} from "../shared/templates";
-import type { TemplateRecord } from "../shared/templates";
-import type { TemplateNodeConfig } from "../shared/template-model";
+} from "../shared/templates.ts";
+import type { TemplateRecord } from "../shared/templates.ts";
+import type { TemplateNodeConfig } from "../shared/template-model.ts";
 
 function node(overrides: Partial<TemplateNodeConfig> & { key: string }): TemplateNodeConfig {
   return {
@@ -119,6 +119,8 @@ test("settings schema:旧文档(无 modeId 之外的采集字段)解析不受新
     assert.equal(old.modeId, undefined);
     assert.equal(old.speedFeatureId, undefined);
     assert.equal(old.speedFeatureValue, undefined);
+    // 新增的启动指令同样是可选字段:旧文档没有它也能原样解析
+    assert.equal(old.prompt, undefined);
   }
 });
 
