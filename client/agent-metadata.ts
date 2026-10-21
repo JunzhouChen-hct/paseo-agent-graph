@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useRpc } from "@getpaseo/plugin/client";
+import { usePaseo, useRpc } from "@getpaseo/plugin/client";
+import { debugReportRpc } from "../shared/graph";
 import {
   METADATA_BATCH_SIZE,
   agentMetadataRpc,
@@ -12,6 +13,9 @@ import type { AgentNodeMetadata } from "../shared/agent-metadata";
 /** 轮询间隔:分支缓存 TTL(服务端 5s)之上的低成本刷新节奏。 */
 const POLL_INTERVAL_MS = 30_000;
 
+/** 快轮询间隔:有压缩中标记时启用,压缩完成的检测延迟从 30s 降到秒级。 */
+const POLL_FAST_INTERVAL_MS = 3_000;
+
 /** 批次失败的上报间隔:同一轮多批失败只记一条,且两次记录至少间隔该时长。 */
 const ERROR_LOG_INTERVAL_MS = 60_000;
 
@@ -21,7 +25,10 @@ const ERROR_LOG_INTERVAL_MS = 60_000;
  * agentIds 超过 RPC 单次上限时自动分片,单批失败不影响其他批:
  * 失败批次的节点沿用上次结果,批次数经限频后写入 console 便于排查。
  */
-export function useAgentMetadata(agentIds: string[]): Record<string, AgentNodeMetadata> {
+export function useAgentMetadata(
+  agentIds: string[],
+  fast = false,
+): Record<string, AgentNodeMetadata> {
   const fetchMetadata = useRpc(agentMetadataRpc);
   const [items, setItems] = useState<Record<string, AgentNodeMetadata>>({});
   // 以稳定字符串为依赖,避免数组引用变化造成反复请求
@@ -85,7 +92,7 @@ export function useAgentMetadata(agentIds: string[]): Record<string, AgentNodeMe
     };
 
     run();
-    const timer = setInterval(run, POLL_INTERVAL_MS);
+    const timer = setInterval(run, fast ? POLL_FAST_INTERVAL_MS : POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
@@ -93,7 +100,90 @@ export function useAgentMetadata(agentIds: string[]): Record<string, AgentNodeMe
       inFlightRef.current = false;
       epochRef.current += 1;
     };
-  }, [idsKey, fetchMetadata]);
+  }, [idsKey, fetchMetadata, fast]);
 
   return items;
+}
+
+/** 自定义 provider 的模型发现冷启动可达数十秒,单次失败后按此节奏重试。 */
+const MODEL_LABELS_RETRY_MS = 5_000;
+const MODEL_LABELS_MAX_ATTEMPTS = 3;
+
+/**
+ * 按提供方拉取模型 id → 展示 label 的映射(卡片模型行显示 label 而非原始 id)。
+ * 模型目录相对静态:每个提供方只拉一次,不轮询;提供方集合变化时增量补充。
+ * 拉取失败按空映射处理,卡片回落显示原始 model id,不冒充 label;
+ * 失败的提供方自动重试(冷启动/瞬时错误),避免一次失败就永久显示原始 id。
+ */
+export function useModelLabels(
+  providers: readonly string[],
+): Record<string, Record<string, string>> {
+  const paseo = usePaseo();
+  const report = useRpc(debugReportRpc);
+  const [labels, setLabels] = useState<Record<string, Record<string, string>>>({});
+  // 重试只补缺失的提供方,需要一个不触发重渲染的当前值镜像
+  const labelsRef = useRef<Record<string, Record<string, string>>>({});
+  labelsRef.current = labels;
+  // 以稳定字符串为依赖,避免数组引用变化造成反复请求
+  const providersKey = useMemo(
+    () => [...new Set(providers)].sort().join("\u0000"),
+    [providers],
+  );
+
+  useEffect(() => {
+    const list = providersKey ? providersKey.split("\u0000") : [];
+    if (list.length === 0) {
+      setLabels({});
+      return;
+    }
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    // 失败重试只补缺:已成功的提供方结果保留在 labels,不被重试轮次覆盖
+    let attempt = 0;
+    const run = async () => {
+      attempt++;
+      const pending = list.filter((provider) => !(provider in labelsRef.current));
+      const entries = await Promise.all(
+        pending.map(async (provider) => {
+          try {
+            const result = await paseo.providers.listModels(provider);
+            const map: Record<string, string> = {};
+            for (const model of result.models ?? []) {
+              // 无 label 或 label 与 id 相同:不进映射,卡片直接显示 id
+              if (model.label && model.label !== model.id) map[model.id] = model.label;
+            }
+            return [provider, map] as const;
+          } catch (error) {
+            void report({
+              payload: `[diag] listModels ${provider} 失败(第 ${attempt} 次): ${error instanceof Error ? error.message : String(error)}`,
+            });
+            return [provider, null] as const;
+          }
+        }),
+      );
+      if (cancelled) return;
+      const failed: string[] = [];
+      for (const [provider, map] of entries) {
+        if (map === null) failed.push(provider);
+      }
+      if (entries.length > 0) {
+        const merged = { ...labelsRef.current };
+        for (const [provider, map] of entries) {
+          if (map !== null) merged[provider] = map;
+        }
+        labelsRef.current = merged;
+        setLabels(merged);
+      }
+      if (failed.length > 0 && attempt < MODEL_LABELS_MAX_ATTEMPTS && !cancelled) {
+        retryTimer = setTimeout(() => void run(), MODEL_LABELS_RETRY_MS);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [paseo, providersKey]);
+
+  return labels;
 }

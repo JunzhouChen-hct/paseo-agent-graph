@@ -10,9 +10,9 @@ import {
   extractAgentMetadata,
   mergeBatchResults,
   splitBatches,
-} from "../shared/agent-metadata";
-import type { AgentMetadataSnapshotLite, AgentNodeMetadata } from "../shared/agent-metadata";
-import { handleAgentMetadata, type BranchResolver } from "../server/agent-metadata";
+} from "../shared/agent-metadata.ts";
+import type { AgentMetadataSnapshotLite, AgentNodeMetadata } from "../shared/agent-metadata.ts";
+import { handleAgentMetadata, type BranchResolver } from "../server/agent-metadata.ts";
 
 /** 便捷构造完整快照的默认字段 */
 function makeSnapshot(overrides: Partial<AgentMetadataSnapshotLite> = {}): AgentMetadataSnapshotLite {
