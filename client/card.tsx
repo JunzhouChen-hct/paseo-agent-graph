@@ -4,6 +4,8 @@ import { useAgent, usePaseo } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { toneOf, type AgentRunStatus, type AgentTone } from "../shared/graph";
+import { blendHex } from "../shared/color";
+import { idleMsSince, resolveIdleTier, type IdleFadeTierConfig } from "../shared/idle-fade";
 import { archivePolicy } from "../shared/archive-policy";
 import type { StatusColors } from "../shared/settings";
 import { DEFAULT_RUNNING_COLOR } from "../shared/settings";
@@ -16,6 +18,8 @@ export interface CardMeta {
   status: AgentRunStatus | null;
   requiresAttention: boolean;
   attentionReason: "finished" | "error" | "permission" | null;
+  /** 最后一次活动时刻(ISO);面板的空闲档位自动归档依赖它,快照未就绪为 null */
+  lastActivityAt: string | null;
 }
 
 /**
@@ -39,6 +43,10 @@ export interface AgentCardProps {
   directoryAttention: boolean;
   /** 节点元数据(思考强度/速度模式/开发分支),面板层批量拉取;无数据为 null。 */
   metadata: (AgentNodeMetadata & { context?: AgentContextUsage | null }) | null;
+  /** 该卡片提供方的模型 id → 展示 label 映射;无 label 回落显示原始 id。 */
+  modelLabels?: ReadonlyMap<string, string> | null;
+  /** 空闲淡出档位(设置持久化);空列表表示不淡出。 */
+  idleTiers: readonly IdleFadeTierConfig[];
   /** 该 agent 所属 workspace 的显示标识(项目总览下用于区分跨工作区节点);null 不显示。 */
   workspaceLabel?: string | null;
   selected: boolean;
@@ -47,6 +55,10 @@ export interface AgentCardProps {
   enableLongPressCopy: boolean;
   statusColors: StatusColors;
   theme: PluginTheme;
+  /** 压缩进行中(卡片按钮或自动压缩已提交、尚未确认完成):橙框 + 占用环旋转 */
+  compacting?: boolean;
+  /** /compact 提交成功(daemon 受理)后回报,面板据此进入压缩中跟踪 */
+  onCompactSubmitted?: (agentId: string, preUsed: number | null) => void;
   onPress(): void;
   /** 右键/长按:复制 Agent ID(反馈由面板统一 toast) */
   onCopyId(): void;
@@ -74,6 +86,15 @@ const THINKING_LABEL: Record<string, string> = {
   high: "高",
   xhigh: "超高",
 };
+
+/** 压缩进行中的指示色(琥珀橙):与运行色区分,深浅主题下都可读 */
+const COMPACT_COLOR = "#F59E0B";
+
+/**
+ * 顶层(主/独立)Agent 卡片背景的 accent 着色权重:混入 surface1 与 accent,
+ * 与子 Agent 的纯 surface1 区分;取值低调,深浅主题下都只是轻微色偏。
+ */
+const TOP_LEVEL_TINT = 0.18;
 
 function toneColor(tone: AgentTone, theme: PluginTheme, colors: StatusColors): string {
   switch (tone) {
@@ -104,15 +125,19 @@ export const AgentCard = memo(function AgentCard({
   fallbackProvider,
   fallbackModel,
   archived,
+  idleTiers,
   directoryStatus,
   directoryAttention,
   metadata,
+  modelLabels,
   workspaceLabel,
   selected,
   canOpenAgent,
   enableLongPressCopy,
   statusColors,
   theme,
+  compacting = false,
+  onCompactSubmitted,
   onPress,
   onCopyId,
   onMeta,
@@ -129,6 +154,7 @@ export const AgentCard = memo(function AgentCard({
     attentionReason: agent.attentionReason,
     title: agent.title,
     model: agent.model,
+    lastActivityAt: agent.lastActivityAt,
   }));
 
   const meta: CardMeta = {
@@ -136,11 +162,14 @@ export const AgentCard = memo(function AgentCard({
     status: live?.status ?? null,
     requiresAttention: live?.requiresAttention ?? directoryAttention,
     attentionReason: live?.attentionReason ?? null,
+    lastActivityAt: live?.lastActivityAt ?? null,
   };
 
   const onMetaRef = useRef(onMeta);
   onMetaRef.current = onMeta;
-  const metaKey = `${meta.parentId ?? ""}|${meta.status ?? ""}|${meta.requiresAttention ? 1 : 0}|${meta.attentionReason ?? ""}`;
+  // lastActivityAt 参与去重键:活动时刻变化要上报面板(空闲自动归档依赖),
+  // 但它只在真实活动时变化,不会造成高频重报
+  const metaKey = `${meta.parentId ?? ""}|${meta.status ?? ""}|${meta.requiresAttention ? 1 : 0}|${meta.attentionReason ?? ""}|${meta.lastActivityAt ?? ""}`;
   useEffect(() => {
     onMetaRef.current(agentId, meta);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -157,6 +186,9 @@ export const AgentCard = memo(function AgentCard({
     parentAgentId: meta.parentId,
   });
   const canArchive = archive.canArchive;
+  // 顶层(主/独立)Agent 与子 Agent 的背景区分:有父即子 Agent。
+  // 父关系未知(live 快照未就绪)保守按顶层,与归档策略同口径。
+  const isTopLevel = meta.parentId === null;
   const tone = toneOf({
     archived,
     status: meta.status ?? directoryStatus,
@@ -164,8 +196,10 @@ export const AgentCard = memo(function AgentCard({
     attentionReason: meta.attentionReason,
   });
   const toneHex = toneColor(tone, theme, statusColors);
+  // 压缩中进行中:呼吸环与状态点换成琥珀橙,和普通运行区分
+  const ringColor = compacting ? COMPACT_COLOR : toneHex;
   // 运行/待处理/出错三种状态呼吸;done/muted 静默,归档走 muted 无动效
-  const animated = tone === "running" || tone === "attention" || tone === "failed";
+  const animated = compacting || tone === "running" || tone === "attention" || tone === "failed";
 
   const pulse = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -194,14 +228,33 @@ export const AgentCard = memo(function AgentCard({
     return () => loop.stop();
   }, [animated, pulse]);
 
+  // 空闲淡出档位随时间推移跨档(30 分钟/2 小时边界):每分钟 tick 重算一次;
+  // 归档卡片不参与(已有自己的 0.4 透明度),不挂定时器
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (archived) return;
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, [archived]);
+
   const paseo = usePaseo();
   const toast = useToast();
+  // 悬停恢复透明度:空闲淡出的卡片鼠标经过时回到完全不透明(web 生效,
+  // 移动端无 hover,走选中恢复)
+  const [hovered, setHovered] = useState(false);
   const [compactPending, setCompactPending] = useState(false);
   // 提交期间的同步防连点 guard:setState 异步,连点窗口内靠 ref 拦截重复提交
   const compactInFlightRef = useRef(false);
-  // 归档 agent 不可发送压缩
+  // 归档 agent 不可发送压缩(按钮不渲染)
   const canCompact = !archived;
+  // 运行中不可发送压缩:避免打断/混入正在进行的回合;压缩进行中的禁用由 compacting 覆盖
+  const compactDisabled = compactPending || compacting || tone === "running";
 
+  // 压缩回调读 ref 而非闭包:metadata 轮询更新不重建回调(参照 onMetaRef 的做法),
+  // 否则首帧 metadata 为 null 时点击压缩,面板拿到的 preUsed 恒为 null,
+  // "用量回落"这一压缩完成主信号会失效
+  const metadataRef = useRef(metadata);
+  metadataRef.current = metadata;
   /**
    * 卡片压缩按钮:仅向本卡 agent 发送 /compact(activeTurnBehavior 显式 "steer",
    * 缺省时 daemon 会打断当前回合;send resolve 即 daemon 已受理)。普通消息队列、
@@ -218,6 +271,9 @@ export const AgentCard = memo(function AgentCard({
       .then(() => {
         // 只报告"已提交",不声称压缩已完成(由 provider 会话异步完成)
         toast.show("压缩命令已提交");
+        // 回报提交时刻与提交前的占用,面板据此标记"压缩中"并在用量回落/回合
+        // 结束后撤销
+        onCompactSubmitted?.(agentId, metadataRef.current?.context?.used ?? null);
       })
       .catch((error: unknown) => {
         toast.error(error instanceof Error ? error.message : "压缩命令发送失败");
@@ -226,7 +282,7 @@ export const AgentCard = memo(function AgentCard({
         compactInFlightRef.current = false;
         setCompactPending(false);
       });
-  }, [agentId, canCompact, paseo, toast]);
+  }, [agentId, canCompact, onCompactSubmitted, paseo, toast]);
 
   const styles = useMemo(
     () =>
@@ -241,7 +297,10 @@ export const AgentCard = memo(function AgentCard({
             : selected
               ? theme.colors.accent
               : theme.colors.border,
-          backgroundColor: theme.colors.surface1,
+          // 顶层(主/独立)Agent 用 accent 微调背景,子 Agent 保持纯 surface1
+          backgroundColor: isTopLevel
+            ? blendHex(theme.colors.surface1, theme.colors.accent, TOP_LEVEL_TINT)
+            : theme.colors.surface1,
           overflow: "hidden",
           // 整卡可点击(打开/收起会话),光标 pointer 仅施加在卡片本体上
           cursor: "pointer",
@@ -252,7 +311,7 @@ export const AgentCard = memo(function AgentCard({
           ...StyleSheet.absoluteFillObject,
           borderRadius: 9,
           borderWidth: 3,
-          borderColor: toneHex,
+          borderColor: ringColor,
         },
         body: {
           paddingHorizontal: 10,
@@ -289,6 +348,7 @@ export const AgentCard = memo(function AgentCard({
         compactText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
         // 压缩按钮悬停/按下反馈
         compactButton: { minHeight: compact ? 28 : undefined, justifyContent: "center", paddingHorizontal: compact ? 6 : 0 },
+        compactDisabled: { opacity: 0.5 },
         compactHover: { backgroundColor: theme.colors.surface2, borderRadius: 4 },
         wsText: {
           flex: 1,
@@ -317,17 +377,24 @@ export const AgentCard = memo(function AgentCard({
         actionHover: { backgroundColor: theme.colors.surface2 },
         actionDivider: { width: 1, backgroundColor: theme.colors.border },
       }),
-    [theme, selected, toneHex, animated, compact],
+    [theme, selected, ringColor, animated, compact, isTopLevel],
   );
 
   const title = live?.title ?? fallbackTitle ?? "未命名 Agent";
   const model = live?.model ?? fallbackModel;
-  // 元数据:思考强度(有效值优先,未知 id 原样展示)与速度模式(descriptor label)同行
+  // 元数据:思考强度(有效值优先,未知 id 原样展示)与速度模式(descriptor label)
   const thinkingLabel = metadata?.thinking
     ? (THINKING_LABEL[metadata.thinking.value] ?? metadata.thinking.value)
     : null;
   const speedLabel = metadata?.speed?.label ?? null;
-  const metaTopText = [thinkingLabel ? `思考 ${thinkingLabel}` : null, speedLabel]
+  // 模型行统一一行:provider · 模型 label(无 label 回落 id) · 思考 · 速度;
+  // 各段缺失即跳过,不冒充默认值
+  const modelLine = [
+    fallbackProvider,
+    model ? (modelLabels?.get(model) ?? model) : null,
+    thinkingLabel,
+    speedLabel,
+  ]
     .filter(Boolean)
     .join(" · ");
   // 上下文占用:T01 的 metadata.context;字段缺失/整体 null/两端皆未知 → 展示"上下文 —"
@@ -343,10 +410,22 @@ export const AgentCard = memo(function AgentCard({
       : `${context.used !== null ? formatTokens(context.used) : "—"} / ${
           context.max !== null ? formatTokens(context.max) : "—"
         }`;
-  const opacity = archived ? 0.4 : 1;
+  // 空闲淡出(shared/idle-fade,档位来自设置):仅对"安静"的卡生效——运行中/
+  // 待处理/出错的卡正等人或正干活,淡出会掩盖需要关注的状态;归档卡已有自己的
+  // 透明度,不叠加。透明度作用于整卡(面板背景 + 里面文字一并变淡),卡片仍可点击;
+  // 悬停或选中即恢复不透明,方便查看/操作淡出的会话。
+  const idleMs = idleMsSince(live?.lastActivityAt, now);
+  const idleTier = idleMs !== null ? resolveIdleTier(idleTiers, idleMs) : null;
+  const fadeEligible =
+    !archived && tone !== "running" && tone !== "attention" && tone !== "failed";
+  const idleOpacity =
+    fadeEligible && idleTier ? Math.min(1, Math.max(0, idleTier.opacity)) : 1;
+  const opacity = archived ? 0.4 : hovered || selected ? 1 : idleOpacity;
   const statusLabel = archived
     ? "已归档"
-    : tone === "attention"
+    : compacting
+      ? "压缩中"
+      : tone === "attention"
       ? meta.attentionReason === "permission"
         ? "待确认"
         : meta.attentionReason === "finished"
@@ -357,6 +436,8 @@ export const AgentCard = memo(function AgentCard({
   return (
     <Pressable
       onPress={onPress}
+      onHoverIn={() => setHovered(true)}
+      onHoverOut={() => setHovered(false)}
       onLongPress={enableLongPressCopy ? onCopyId : undefined}
       // 桌面右键:RN PointerEvent 继承 MouseEvent.button,2=右键;
       // 阻断冒泡避免触发选中/打开;右键不产生 click,onPress 不会被触发
@@ -374,22 +455,14 @@ export const AgentCard = memo(function AgentCard({
           {title}
         </Text>
         <Text style={styles.subtitle} numberOfLines={1}>
-          {fallbackProvider}
-          {model ? ` · ${model}` : ""}
+          {modelLine}
         </Text>
         <View style={styles.statusRow}>
-          <View style={[styles.statusDot, { backgroundColor: toneHex }]} />
+          <View style={[styles.statusDot, { backgroundColor: ringColor }]} />
           <Text style={styles.statusText}>{statusLabel}</Text>
           {workspaceLabel ? (
             <Text style={styles.wsText} numberOfLines={1} ellipsizeMode="tail">
               · {workspaceLabel}
-            </Text>
-          ) : null}
-        </View>
-        <View style={styles.metaRow}>
-          {metaTopText ? (
-            <Text style={styles.metaText} numberOfLines={1}>
-              {metaTopText}
             </Text>
           ) : null}
         </View>
@@ -408,30 +481,40 @@ export const AgentCard = memo(function AgentCard({
             <ContextMeter
               ratio={contextRatio}
               trackColor={theme.colors.border}
-              progressColor={contextRatio > 0.85 ? theme.colors.statusDanger : theme.colors.accent}
+              progressColor={
+                compacting
+                  ? COMPACT_COLOR
+                  : contextRatio > 0.85
+                    ? theme.colors.statusDanger
+                    : theme.colors.accent
+              }
               size={11}
               thickness={2}
+              spin={compacting}
             />
           ) : null}
           <Text style={styles.contextText} numberOfLines={1} ellipsizeMode="tail">
             {contextText}
           </Text>
-          {/* 归档不可发送压缩;onPress 阻断冒泡,避免触发卡片选中/收起内置会话,
-              也不顺带 ack finished 关注;提交期间禁用,连点由 ref guard 同步拦截 */}
+          {/* 归档不可发送压缩(不渲染);onPress 阻断冒泡,避免触发卡片选中/收起内置会话,
+              也不顺带 ack finished 关注;提交中/压缩中/运行中禁用,连点由 ref guard 同步拦截 */}
           {canCompact ? (
             <FeedbackPressable
-              style={styles.compactButton}
+              style={[styles.compactButton, compactDisabled && styles.compactDisabled]}
               hoverStyle={styles.compactHover}
               onPress={(event) => {
                 event.stopPropagation();
                 handleCompact();
               }}
-              disabled={compactPending}
+              // 提交在途/压缩进行中/普通运行中都禁用:压缩完成后由面板撤销标记自动恢复
+              disabled={compactDisabled}
               hitSlop={{ top: compact ? 8 : 5, bottom: compact ? 8 : 5, left: 4, right: 4 }}
               accessibilityRole="button"
               accessibilityLabel="压缩上下文"
             >
-              <Text style={styles.compactText}>{compactPending ? "提交中" : "压缩"}</Text>
+              <Text style={styles.compactText}>
+                {compactPending ? "提交中" : compacting ? "压缩中" : "压缩"}
+              </Text>
             </FeedbackPressable>
           ) : null}
         </View>

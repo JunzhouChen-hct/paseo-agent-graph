@@ -83,7 +83,8 @@ function InlineRuns({ text }: { text: string }) {
   );
 }
 
-function MarkdownText({
+/** 轻量 Markdown 渲染(粗体/行内码/代码块/标题/列表/表格);任务详情结果栏复用。 */
+export function MarkdownText({
   text,
   theme,
   baseStyle,
@@ -117,7 +118,20 @@ function MarkdownText({
       }
       codeBuffer = null;
     };
+
+    // —— pipe 表格:| a | b | 连续行,第二行 |---| 为分隔;对齐语法解析但统一左对齐 ——
+    const splitTableRow = (line: string): string[] =>
+      line
+        .replace(/^\s*\|/, "")
+        .replace(/\|\s*$/, "")
+        .split("|")
+        .map((cell) => cell.trim());
+    const isTableSeparator = (line: string): boolean =>
+      /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(line);
+
+    let skipUntil = -1;
     lines.forEach((line, index) => {
+      if (index <= skipUntil) return;
       if (line.trimStart().startsWith("```")) {
         if (codeBuffer) flushCode(`c${index}`);
         else codeBuffer = [];
@@ -125,6 +139,71 @@ function MarkdownText({
       }
       if (codeBuffer) {
         codeBuffer.push(line);
+        return;
+      }
+      if (line.trimStart().startsWith("|")) {
+        let end = index;
+        while (end + 1 < lines.length && lines[end + 1]!.trimStart().startsWith("|")) end++;
+        const rawBlock = lines.slice(index, end + 1);
+        const hasSeparator = rawBlock.some((candidate, offset) => offset > 0 && isTableSeparator(candidate));
+        const parsed = rawBlock.map(splitTableRow);
+        // 分隔行(每格都是 --- 或空)从数据行里剔除
+        const isSeparatorRow = (cells: string[]): boolean =>
+          cells.every((cell) => cell === "" || /^:?-+:?$/.test(cell));
+        const rows = hasSeparator ? parsed.filter((cells) => !isSeparatorRow(cells)) : parsed;
+        const header: string[] | null = hasSeparator ? rows[0] ?? null : null;
+        const body: string[][] = hasSeparator ? rows.slice(1) : rows;
+        const cellStyle = { flex: 1, paddingHorizontal: 6, paddingVertical: 4 } as const;
+        output.push(
+          <View
+            key={`tbl${index}`}
+            style={{
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              borderRadius: 6,
+              overflow: "hidden",
+              marginVertical: 3,
+            }}
+          >
+            {header ? (
+              <View
+                style={{
+                  flexDirection: "row",
+                  backgroundColor: theme.colors.surface1,
+                  borderBottomWidth: 1,
+                  borderBottomColor: theme.colors.border,
+                }}
+              >
+                {header.map((cell, cellIndex) => (
+                  <View key={cellIndex} style={cellStyle}>
+                    <Text style={{ color: theme.colors.foreground, fontSize: 11, fontWeight: "700", lineHeight: 15 }}>
+                      <InlineRuns text={cell ?? ""} />
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+            {body.map((row, rowIndex) => (
+              <View
+                key={`r${rowIndex}`}
+                style={{
+                  flexDirection: "row",
+                  borderBottomWidth: rowIndex < body.length - 1 ? 1 : 0,
+                  borderBottomColor: theme.colors.border,
+                }}
+              >
+                {row.map((cell, cellIndex) => (
+                  <View key={cellIndex} style={cellStyle}>
+                    <Text style={{ color: theme.colors.foreground, fontSize: 11, lineHeight: 15 }}>
+                      <InlineRuns text={cell ?? ""} />
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ))}
+          </View>,
+        );
+        skipUntil = end;
         return;
       }
       const heading = /^(#{1,4})\s+(.*)$/.exec(line);

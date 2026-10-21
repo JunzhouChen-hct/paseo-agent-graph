@@ -17,6 +17,54 @@ export interface GraphEdgeLineProps {
   sampled: SampledPath;
   color: string; // 静态线颜色(运行色或主题边框色)
   dim: boolean; // 任一端已归档 → 置淡
+  /** 灰色虚线(主 Agent → 任务列表的挂载连线);不改变路径,只改线段切分 */
+  dashed?: boolean;
+}
+
+const DASH_LENGTH = 6;
+const DASH_GAP = 4;
+const DASH_MIN_LENGTH = 1;
+
+/**
+ * 把正交折线切成虚线短段。仍复用"旋转矩形"渲染方式,不依赖平台对
+ * borderStyle:"dashed" 的支持差异;虚线只用于静态挂载边,不参与流点。
+ */
+function buildDashedSegmentViews(path: SampledPath, lineWidth: number) {
+  const views: {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    rotateDeg: number;
+  }[] = [];
+  for (let i = 1; i < path.points.length; i++) {
+    const a = path.points[i - 1]!;
+    const b = path.points[i]!;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    if (length < 0.25) continue;
+    const ux = dx / length;
+    const uy = dy / length;
+    const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+    let offset = 0;
+    while (offset < length) {
+      const end = Math.min(offset + DASH_LENGTH, length);
+      const dash = end - offset;
+      if (dash >= DASH_MIN_LENGTH) {
+        const mid = offset + dash / 2;
+        views.push({
+          left: a.x + ux * mid - dash / 2,
+          top: a.y + uy * mid - lineWidth / 2,
+          width: dash,
+          height: lineWidth,
+          rotateDeg: angle,
+        });
+      }
+      offset += DASH_LENGTH + DASH_GAP;
+    }
+  }
+  return views;
 }
 
 export interface GraphEdgeFlowProps {
@@ -30,8 +78,14 @@ export interface GraphEdgeFlowProps {
  * 相邻段共享端点上(等价 SVG round join),直角拐角接缝无隆起、无缺口。
  * 不运行动画;与 GraphEdgeFlow 消费同一份采样。
  */
-export function GraphEdgeLine({ sampled, color, dim }: GraphEdgeLineProps) {
-  const segments = useMemo(() => buildSegmentViews(sampled, LINE_WIDTH), [sampled]);
+export function GraphEdgeLine({ sampled, color, dim, dashed = false }: GraphEdgeLineProps) {
+  const segments = useMemo(
+    () =>
+      dashed
+        ? buildDashedSegmentViews(sampled, LINE_WIDTH)
+        : buildSegmentViews(sampled, LINE_WIDTH),
+    [sampled, dashed],
+  );
   return (
     <>
       {segments.map((seg, index) => (

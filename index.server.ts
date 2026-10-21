@@ -1,6 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { agentGraphSettings } from "./shared/settings";
 import { agentGraphTemplatesSettings } from "./shared/templates";
+import { agentGraphTaskListSettings } from "./shared/task-list";
 import { acceptAgentRpc, cancelAgentRpc, configureAgentRpc, debugReportRpc, renameAgentRpc } from "./shared/graph";
 import { agentMetadataRpc } from "./shared/agent-metadata";
 import { importTemplateRpc, createTaskFromTemplateRpc } from "./shared/templates";
@@ -12,6 +13,7 @@ export default function contribute(server: PluginServerContext) {
   // 注册 settings 存储:宿主据此接管 settings.* RPC(read/write/reset)
   server.registerSettings(agentGraphSettings);
   server.registerSettings(agentGraphTemplatesSettings);
+  server.registerSettings(agentGraphTaskListSettings);
   server.handle(cancelAgentRpc, handleCancel);
   server.handle(configureAgentRpc, handleConfigure);
   server.handle(acceptAgentRpc, handleAccept);
