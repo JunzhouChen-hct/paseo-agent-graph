@@ -6,14 +6,25 @@ import { AgentGraphSettingsScreen } from "./client/settings-screen";
 
 export default function contribute(client: PluginClientContext) {
   const target = graphPanelTarget(Platform.OS);
-  const stopPanel = client.addWorkspacePanel({
-    id: target.id,
-    locations: [target.location],
-    title: "Agent Graph",
-    icon: "Workflow",
-    context: "workspace",
-    Component: GraphPanel,
-  });
+  // 桌面/web:单一静态面板——"+"菜单只出现一个 Agent Graph 入口,命令中心/标题栏
+  // 打开时显式携带当前 workspaceId,由宿主把标签绑定到对应工作区。
+  // 原生手机:保留按工作区懒注册的专属面板(原生标签身份曾出现跨项目复用,见
+  // createWorkspaceGraphPanels),两条路径都经 workspacePanels.open。
+  const isNative = target.id === "agent-graph-mobile";
+  const stopPanel = isNative
+    ? undefined
+    : client.addWorkspacePanel({
+        id: target.id,
+        locations: [target.location],
+        title: "Agent Graph",
+        icon: "Workflow",
+        context: "workspace",
+        Component: GraphPanel,
+      });
+  const openInWorkspace = (workspaceId: string) => {
+    if (isNative) workspacePanels.open(workspaceId);
+    else client.openPanel(target.id, { workspaceId, location: target.location });
+  };
   const workspacePanels = createWorkspaceGraphPanels(client, target.id, GraphPanel);
   const stopCommand = client.addCommandCenterItem({
     id: "open-agent-graph",
@@ -22,7 +33,7 @@ export default function contribute(client: PluginClientContext) {
     keywords: ["agents", "graph", "节点图", "关系图"],
     context: "workspace",
     onSelect({ workspace }) {
-      workspacePanels.open(workspace.id);
+      openInWorkspace(workspace.id);
     },
   });
   const stopSettings = client.addSettingsScreen({
@@ -31,11 +42,11 @@ export default function contribute(client: PluginClientContext) {
     icon: "Settings2",
     Component: AgentGraphSettingsScreen,
   });
-  const stopMobileEntry = contributeMobileEntry(client, (workspaceId) => workspacePanels.open(workspaceId));
+  const stopMobileEntry = contributeMobileEntry(client, openInWorkspace);
   return () => {
     stopMobileEntry();
     workspacePanels.dispose();
-    void stopPanel();
+    if (stopPanel) void stopPanel();
     void stopCommand();
     void stopSettings();
   };
