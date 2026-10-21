@@ -1,6 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { pickSpeedFeature } from "./provider-speed";
+import { pickSpeedFeature } from "./provider-speed.ts";
 
 /**
  * 节点卡片元数据:模型思考强度 / 速度模式 / 对应开发分支。

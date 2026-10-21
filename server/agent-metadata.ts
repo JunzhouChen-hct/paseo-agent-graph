@@ -9,7 +9,7 @@ import {
   extractAgentMetadata,
   type AgentMetadataSnapshotLite,
   type AgentNodeMetadata,
-} from "../shared/agent-metadata";
+} from "../shared/agent-metadata.ts";
 
 /** 单个 git 查询的进程超时,防止挂死的仓库拖垮整个 RPC。 */
 const GIT_TIMEOUT_MS = 1500;

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { contributeMobileEntry, createWorkspaceGraphPanels, graphPanelTarget, workspaceGraphPanelId, registerWorkspaceGraphButton } from "../client/mobile-entry";
+import { contributeMobileEntry, createWorkspaceGraphPanels, graphPanelTarget, workspaceGraphPanelId, registerWorkspaceGraphButton } from "../client/mobile-entry.ts";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 

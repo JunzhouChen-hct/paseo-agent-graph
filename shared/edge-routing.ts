@@ -10,7 +10,7 @@
  * 不依赖 React / React Native,可被 client 与 tests 共用。
  */
 
-import { buildPolylinePath, type Point, type SampledPath } from "./edge-geometry";
+import { buildPolylinePath, type Point, type SampledPath } from "./edge-geometry.ts";
 
 /** 障碍矩形(卡片槽位),坐标系与布局画布一致 */
 export interface ObstacleRect {

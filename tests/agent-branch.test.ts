@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createBranchResolver, resolveAgentBranch } from "../server/agent-metadata";
+import { createBranchResolver, resolveAgentBranch } from "../server/agent-metadata.ts";
 
 /** 临时 git fixture 根目录,用例结束统一清理 */
 let fixtureRoot: string | null = null;

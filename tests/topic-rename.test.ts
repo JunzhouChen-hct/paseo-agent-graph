@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRenameSubmitter, renameAgentRpc, sanitizeRenameTitle } from "../shared/graph";
+import { createRenameSubmitter, renameAgentRpc, sanitizeRenameTitle } from "../shared/graph.ts";
 
 test("rename 契约:空标题被 input schema 拒绝,正常标题通过", () => {
   assert.throws(() => renameAgentRpc.input.parse({ agentId: "agent-1", title: "" }));

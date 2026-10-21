@@ -7,7 +7,7 @@ import {
   buildSegmentViews,
   PATH_MIN_LENGTH,
   type Point,
-} from "../shared/edge-geometry";
+} from "../shared/edge-geometry.ts";
 
 function strictlyIncreasing(values: number[]): boolean {
   for (let i = 1; i < values.length; i++) {

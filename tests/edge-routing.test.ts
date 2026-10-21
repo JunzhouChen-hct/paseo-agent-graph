@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeLayout, type LayoutResult } from "../client/layout";
+import { computeLayout, type LayoutResult } from "../client/layout.ts";
 import {
   freeXBands,
   planEdgePath,
@@ -10,8 +10,8 @@ import {
   segmentIntersectsRect,
   type ObstacleRect,
   type PlannedEdgePath,
-} from "../shared/edge-routing";
-import { assignExitOffsets, type Point } from "../shared/edge-geometry";
+} from "../shared/edge-routing.ts";
+import { assignExitOffsets, type Point } from "../shared/edge-geometry.ts";
 
 interface PlannedEdge extends PlannedEdgePath {
   fromId: string;

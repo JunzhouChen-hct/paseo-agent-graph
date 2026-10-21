@@ -1,5 +1,5 @@
 import { createElement, type ComponentType } from "react";
-import { debugReportRpc } from "../shared/graph";
+import { debugReportRpc } from "../shared/graph.ts";
 import type { PluginClientContext, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 
 /** 原生手机使用独立标签 ID，避免复用到历史上不可见的面板位置。

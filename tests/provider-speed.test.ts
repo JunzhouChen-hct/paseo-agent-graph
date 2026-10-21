@@ -6,7 +6,7 @@ import {
   speedFeatureValuesForSelection,
   speedSelectionValid,
   type RawFeatureDescriptor,
-} from "../shared/provider-speed";
+} from "../shared/provider-speed.ts";
 
 /** Codex 真实目录形态:select id=service_tier,label=Speed,选项 default/priority */
 const CODEX_SPEED: RawFeatureDescriptor = {
