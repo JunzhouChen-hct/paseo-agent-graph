@@ -8,6 +8,8 @@ export interface TimelineView {
   text: string;
   meta: string | null;
   messageId: string | null;
+  /** tool_call 条目的原始 detail(协议 ToolCallDetail 形状);非工具条目缺省 */
+  toolDetail?: unknown;
 }
 
 /** 从 timeline 响应的 agent 快照里提取配置与用量信息。 */
@@ -28,6 +30,8 @@ interface RawItemShape {
   name?: string;
   status?: string;
   messageId?: string;
+  /** tool_call 条目的协议 detail(ToolCallDetail);仅透传,不在此解释 */
+  detail?: unknown;
 }
 
 interface AgentSnapshotLike {
@@ -52,7 +56,8 @@ interface TimelinePayloadLike {
   agent?: AgentSnapshotLike | null;
 }
 
-function viewOfItem(item: RawItemShape, index: number, timestamp: string): TimelineView | null {
+/** 导出给运行活动行(useRunActivity)复用;测试也直接消费该纯映射 */
+export function viewOfItem(item: RawItemShape, index: number, timestamp: string): TimelineView | null {
   const key = `${timestamp}-${index}`;
   const messageId = item.messageId ?? null;
   switch (item.type) {
@@ -69,6 +74,7 @@ function viewOfItem(item: RawItemShape, index: number, timestamp: string): Timel
         text: item.name ?? "tool",
         meta: item.status ?? null,
         messageId,
+        toolDetail: item.detail,
       };
     case "error":
       return { key, kind: "error", text: item.message ?? "发生错误", meta: null, messageId };

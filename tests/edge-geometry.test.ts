@@ -83,3 +83,4 @@ test("assignExitOffsets:单 child 居中,多 child 有序且唯一", () => {
 test("导出常量存在(渲染层依赖)", () => {
   assert.equal(typeof PATH_MIN_LENGTH, "number");
 });
+

@@ -1,11 +1,13 @@
 /**
- * 边正交避障路由纯逻辑:连线一律为清晰的正交折线(无贝塞尔/圆弧)。
+ * 边正交避障路由纯逻辑(横向语义,配合层级列布局):连线一律为清晰的
+ * 正交折线(无贝塞尔/圆弧),从父卡片右缘流出、子卡片左缘流入。
  * 候选按优先级裁决,首个可行者胜出,不做全局最短比较:
- * 1) 同列直落(父/子 x 对齐);
- * 2) 相邻行带内台阶——水平段走父行与子行之间的空带(布局行对齐,空带内无卡片);
- * 3) 跨行竖直通道——优先穿过中间行卡片之间的竖直空隙(列间距 gapX),
- *    通道按距 from/to 中线近远排序,窄面板优先中间而非外侧大绕;
- * 4) 外侧绕行——仅当中间无通道可行时,绕障碍簇左右极外;
+ * 1) 同行直连(父/子 y 对齐);
+ * 2) 列间台阶——竖直段走父列与子列之间的列间通道(布局保证通道内无卡片),
+ *    竖直段的 x 可由调用方按边分配车道(laneXs),同父多边不共线;
+ * 3) 跨列水平通道——仅当列间台阶被障碍(异常布局/挂载物)封死时,穿过
+ *    列内卡片行之间的水平空隙(gapRow),按距 from/to 中线近远排序;
+ * 4) 外侧绕行——障碍簇上/下极外,仅中间无通道可行时;
  * 全部候选逐段做膨胀矩形碰撞校验,全部失败退回正交直连并标记 degraded。
  * 不依赖 React / React Native,可被 client 与 tests 共用。
  */
@@ -23,15 +25,14 @@ export interface ObstacleRect {
 
 /**
  * 避障裕量:呼吸框(3,画在卡片边界外 3px)+ 流点半径(2.5)+ 0.5 残差。
- * 刻意小于历史上的 12px:窄面板列间距 gapX=18,两侧各 12 的膨胀会把
- * 中间通道完全封死(18-24<0),迫使所有跨行边走外侧大绕;6px 裕量下
- * 通道仍有 6px 通行宽度,恰好容纳 2px 线与 5px 流点且不碰呼吸框。
+ * 与旧竖向布局一致的取值:列内行距 gapRow=18(窄面板)下水平通道仍有
+ * 6px 通行宽度,恰好容纳 2px 线与 5px 流点且不碰呼吸框。
  */
 export const ROUTE_MARGIN = 6;
 
-/** 跨行边出/入口在行间带内的车道偏移(px):贴父/子 12px,避开带中央的公共车道 */
+/** 跨列边出/入口在列间通道内的车道偏移(px):贴父/子 12px,留出直连空间 */
 const LANE_OFFSET = 12;
-/** 中间通道候选上限(按距中线近远排序后截取) */
+/** 水平通道候选上限(按距中线近远排序后截取) */
 const MAX_CHANNEL_CANDIDATES = 6;
 /**
  * 外侧走廊额外净空(px):走廊放在"膨胀边界再外移"处。
@@ -44,7 +45,7 @@ export interface PlannedEdgePath {
   waypoints: Point[];
   /** 采样路径(即航点折线本身);静态线与流点渲染必须消费同一份对象 */
   sampled: SampledPath;
-  /** true = 无绕行(直落或带内台阶);false = 经过通道/外侧绕行 */
+  /** true = 无绕行(直连或列间台阶);false = 经过通道/外侧绕行 */
   direct: boolean;
   /**
    * true = 直连但已知与障碍碰撞(所有绕行策略全部失败后的兜底)。
@@ -120,25 +121,25 @@ function pathLength(points: readonly Point[]): number {
 }
 
 /**
- * 计算竖直跨度 (yLo,yHi) 上、x 区间 [xLo,xHi] 内无障碍遮挡的自由 x 带
- * (膨胀后):收集 y 范围与该竖直跨度相交的障碍 x 区间,排序合并后取补集。
- * 用于寻找穿过中间行的竖直通道(卡片之间的列间空隙)。
+ * 计算水平跨度 (xLo,xHi) 上、y 区间 [yLo,yHi] 内无障碍遮挡的自由 y 带
+ * (膨胀后):收集 x 范围与该水平跨度相交的障碍 y 区间,排序合并后取补集。
+ * 用于寻找穿过中间列卡片行之间的水平通道(卡片之间的行间空隙)。
  */
-export function freeXBands(
-  xLo: number,
-  xHi: number,
-  yA: number,
-  yB: number,
+export function freeYBands(
+  yLo: number,
+  yHi: number,
+  xA: number,
+  xB: number,
   obstacles: readonly ObstacleRect[],
   margin: number,
 ): Array<[number, number]> {
-  const yLo = Math.min(yA, yB);
-  const yHi = Math.max(yA, yB);
+  const xLo = Math.min(xA, xB);
+  const xHi = Math.max(xA, xB);
   const intervals: Array<[number, number]> = [];
   for (const rect of obstacles) {
     const box = inflate(rect, margin);
-    if (box.y + box.height <= yLo || box.y >= yHi) continue;
-    intervals.push([box.x, box.x + box.width]);
+    if (box.x + box.width <= xLo || box.x >= xHi) continue;
+    intervals.push([box.y, box.y + box.height]);
   }
   intervals.sort((a, b) => a[0] - b[0]);
   const merged: Array<[number, number]> = [];
@@ -148,116 +149,124 @@ export function freeXBands(
     else merged.push([start, end]);
   }
   const bands: Array<[number, number]> = [];
-  let cursor = xLo;
+  let cursor = yLo;
   for (const [start, end] of merged) {
-    if (start > cursor) bands.push([cursor, Math.min(start, xHi)]);
+    if (start > cursor) bands.push([cursor, Math.min(start, yHi)]);
     cursor = Math.max(cursor, end);
-    if (cursor >= xHi) break;
+    if (cursor >= yHi) break;
   }
-  if (cursor < xHi) bands.push([cursor, xHi]);
+  if (cursor < yHi) bands.push([cursor, yHi]);
   return bands.filter(([start, end]) => end - start > 0.5);
 }
 
-/** 从自由带中取通道 x 候选:每带夹取到最接近 desired 的位置,按距 desired 近远排序限量 */
-function channelXs(bands: ReadonlyArray<[number, number]>, desired: number): number[] {
+/** 从自由带中取通道 y 候选:每带夹取到最接近 desired 的位置,按距 desired 近远排序限量 */
+function channelYs(bands: ReadonlyArray<[number, number]>, desired: number): number[] {
   const all: number[] = [];
   for (const [start, end] of bands) {
     all.push(Math.min(Math.max(desired, start + 0.5), end - 0.5));
   }
   all.sort((a, b) => Math.abs(a - desired) - Math.abs(b - desired));
   const picked: number[] = [];
-  for (const x of all) {
-    if (!picked.some((value) => Math.abs(value - x) < 0.5)) picked.push(x);
+  for (const y of all) {
+    if (!picked.some((value) => Math.abs(value - y) < 0.5)) picked.push(y);
     if (picked.length >= MAX_CHANNEL_CANDIDATES) break;
   }
   return picked;
 }
 
-/** 跨行绕行的统一形态:出口车道 → 竖直走廊 → 入口车道 → 目标 */
-function viaCorridor(from: Point, to: Point, cx: number, yA: number, yB: number): Point[] {
-  return [from, { x: from.x, y: yA }, { x: cx, y: yA }, { x: cx, y: yB }, { x: to.x, y: yB }, to];
+/** 跨列绕行的统一形态:出口车道 → 水平走廊 → 入口车道 → 目标 */
+function viaHorizontalCorridor(from: Point, to: Point, cy: number, xA: number, xB: number): Point[] {
+  return [from, { x: xA, y: from.y }, { x: xA, y: cy }, { x: xB, y: cy }, { x: xB, y: to.y }, to];
 }
 
 /**
  * 规划一条边的正交路径(候选按优先级,首个可行者胜出):
- * 1) 同列直落;2) 相邻行带内台阶(水平段走行间空带中央);
- * 3) 跨行中间通道(卡片间列间空隙,近中线优先);4) 外侧极外绕行(仅必要时);
- * 5) 全部失败退回正交直连,标记 degraded 供上层诊断。
+ * 1) 同行直连;2) 列间台阶(竖直段走父/子列之间的通道,车道 x 由
+ * opts.laneXs 指定,未指定时取中点);3) 跨列水平通道(卡片行间空隙,
+ * 近中线优先);4) 外侧极外绕行(仅必要时);5) 全部失败退回正交直连,
+ * 标记 degraded 供上层诊断。
  * obstacles 必须不含该边两端各自的卡片(端点在卡片边界上,膨胀后必相交)。
  */
 export function planEdgePath(
   from: Point,
   to: Point,
   obstacles: readonly ObstacleRect[],
-  opts?: { margin?: number },
+  opts?: { margin?: number; laneXs?: readonly number[] },
 ): PlannedEdgePath {
   const margin = opts?.margin ?? ROUTE_MARGIN;
   const feasible = (waypoints: readonly Point[]): SampledPath | null =>
     polylineHitsRects(waypoints, obstacles, margin) === null ? buildPolylinePath(waypoints) : null;
 
   // 兜底形状(degraded 时同样保持正交形态,不画错不消失)
-  const aligned = Math.abs(from.x - to.x) < 0.5;
+  const aligned = Math.abs(from.y - to.y) < 0.5;
+  const midX = (from.x + to.x) / 2;
   const fallbackWaypoints: Point[] = aligned
     ? [from, to]
     : [
         from,
-        { x: from.x, y: (from.y + to.y) / 2 },
-        { x: to.x, y: (from.y + to.y) / 2 },
+        { x: midX, y: from.y },
+        { x: midX, y: to.y },
         to,
       ];
 
-  // 1) 同列直落 / 2) 带内台阶(相邻行:水平段走父行与子行之间的空带)
-  const directWaypoints: Point[] = aligned
-    ? [from, to]
-    : [
-        from,
-        { x: from.x, y: (from.y + to.y) / 2 },
-        { x: to.x, y: (from.y + to.y) / 2 },
-        to,
-      ];
-  const directSampled = feasible(directWaypoints);
-  if (directSampled) {
-    return { waypoints: directWaypoints, sampled: directSampled, direct: true, degraded: false };
+  // 1) 同行直连 / 2) 列间台阶(竖直段走列间通道,车道 x 逐个尝试)
+  const laneCandidates: number[] = [];
+  for (const lane of opts?.laneXs ?? []) {
+    if (!laneCandidates.some((value) => Math.abs(value - lane) < 0.5)) laneCandidates.push(lane);
+  }
+  if (!laneCandidates.some((value) => Math.abs(value - midX) < 0.5)) laneCandidates.push(midX);
+  for (const lane of laneCandidates) {
+    const waypoints: Point[] = aligned
+      ? [from, to]
+      : [
+          from,
+          { x: lane, y: from.y },
+          { x: lane, y: to.y },
+          to,
+        ];
+    const sampled = feasible(waypoints);
+    if (sampled) {
+      return { waypoints, sampled, direct: true, degraded: false };
+    }
   }
 
-  // 跨行:在行间带内取车道,穿中间通道或绕外侧
-  if (to.y - from.y >= LANE_OFFSET * 2 + 1) {
-    const yA = from.y + LANE_OFFSET;
-    const yB = to.y - LANE_OFFSET;
-    const desired = (from.x + to.x) / 2;
+  // 跨列:在列间带内取车道,穿水平通道或绕外侧
+  if (Math.abs(to.x - from.x) >= LANE_OFFSET * 2 + 1) {
+    const xA = from.x < to.x ? from.x + LANE_OFFSET : from.x - LANE_OFFSET;
+    const xB = from.x < to.x ? to.x - LANE_OFFSET : to.x + LANE_OFFSET;
+    const desired = (from.y + to.y) / 2;
 
-    // 3) 中间通道:穿过中间行卡片之间的竖直空隙(列间距 gapX),近中线优先。
-    //    搜索范围限定为与竖直跨度相交的障碍簇 x 跨度 → 候选全是卡片之间的
-    //    内部空隙,不混入簇外区域(外侧绕行只走第 4 步);范围不含 from/to
-    //    本身,左列子节点的唯一行间空隙(在 to.x 之外)也能被找到。
+    // 3) 水平通道:穿过中间列卡片行之间的空隙(gapRow),近中线优先。
+    //    搜索范围限定为与水平跨度相交的障碍簇 y 跨度 → 候选全是卡片之间的
+    //    内部空隙,不混入簇外区域(外侧绕行只走第 4 步)。
     const crossing = obstacles.filter((rect) => {
       const box = inflate(rect, margin);
-      return box.y + box.height > yA && box.y < yB;
+      return box.x + box.width > Math.min(xA, xB) && box.x < Math.max(xA, xB);
     });
     if (crossing.length > 0) {
-      const cLo = Math.min(...crossing.map((rect) => rect.x));
-      const cHi = Math.max(...crossing.map((rect) => rect.x + rect.width));
-      const bands = freeXBands(cLo, cHi, yA, yB, obstacles, margin);
-      for (const cx of channelXs(bands, desired)) {
-        const waypoints = viaCorridor(from, to, cx, yA, yB);
+      const cLo = Math.min(...crossing.map((rect) => rect.y));
+      const cHi = Math.max(...crossing.map((rect) => rect.y + rect.height));
+      const bands = freeYBands(cLo, cHi, xA, xB, obstacles, margin);
+      for (const cy of channelYs(bands, desired)) {
+        const waypoints = viaHorizontalCorridor(from, to, cy, xA, xB);
         const sampled = feasible(waypoints);
         if (sampled) return { waypoints, sampled, direct: false, degraded: false };
       }
     }
 
-    // 4) 外侧:仅当中间无通道可行;左右都能走时取总长更短的一侧
-    let bxLeft = Math.min(from.x, to.x);
-    let bxRight = Math.max(from.x, to.x);
+    // 4) 外侧:仅当中间无通道可行;上/下都能走时取总长更短的一侧
+    let byTop = Math.min(from.y, to.y);
+    let byBottom = Math.max(from.y, to.y);
     for (const rect of obstacles) {
-      bxLeft = Math.min(bxLeft, rect.x);
-      bxRight = Math.max(bxRight, rect.x + rect.width);
+      byTop = Math.min(byTop, rect.y);
+      byBottom = Math.max(byBottom, rect.y + rect.height);
     }
-    bxLeft -= margin + CORRIDOR_CLEARANCE;
-    bxRight += margin + CORRIDOR_CLEARANCE;
+    byTop -= margin + CORRIDOR_CLEARANCE;
+    byBottom += margin + CORRIDOR_CLEARANCE;
     let best: { waypoints: Point[]; sampled: SampledPath } | null = null;
-    for (const bx of [bxRight, bxLeft]) {
-      if (bx < 1) continue; // 画布左界保护:x<0 的走廊会被裁掉
-      const waypoints = viaCorridor(from, to, bx, yA, yB);
+    for (const by of [byTop, byBottom]) {
+      if (by < 1) continue; // 画布上界保护:y<0 的走廊会被裁掉
+      const waypoints = viaHorizontalCorridor(from, to, by, xA, xB);
       const sampled = feasible(waypoints);
       if (!sampled) continue;
       if (!best || pathLength(waypoints) < pathLength(best.waypoints)) {

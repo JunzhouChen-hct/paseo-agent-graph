@@ -34,7 +34,7 @@ import {
   workspaceBadgeLabel,
 } from "../shared/project-scope";
 import { useProjectAgentDirectory, type DirectoryAgent } from "./directory";
-import { computeLayout, type LayoutResult } from "./layout";
+import { computeLayout, type LayoutPosition, type LayoutResult } from "./layout";
 import { AgentCard, type CardMeta } from "./card";
 import { FeedbackPressable } from "./feedback-pressable";
 import { GraphEdgeFlow, GraphEdgeLine } from "./edge";
@@ -60,17 +60,22 @@ const CARD_W = 236;
 const CARD_W_COMPACT = 164;
 // 原内容 + 一行元数据(分支;思考/速度已并入模型行) + 一行 workspace 标识的预留余量
 // + 上下文行(占用环 + used/max + 压缩按钮,约 17);模型行加宽到 236 容纳 label+思考+速度
-const CARD_H = 132;
-const CARD_H_COMPACT = 168;
-const GAP_X = 26;
-const GAP_Y = 58;
-// 父卡片底部两侧各留的边距:多条边在该范围内分配唯一出线点
+// + 运行活动行(耗时 · tok/s · progress,仅运行中渲染,高度预算为其预留 16)
+const CARD_H = 148;
+const CARD_H_COMPACT = 184;
+/** 窄屏画布等比缩放下限:低于此值不再缩小,改横向滚动 */
+const MIN_CANVAS_SCALE = 0.58;
+/** 列间距:父列与子列之间的通道,容纳边的竖直车道(呼吸框+流点+多车道分布) */
+const GAP_COL = 52;
+/** 列内行距:同列卡片竖直间距,同时是跨列水平通道的通行空间 */
+const GAP_ROW = 26;
+// 父卡片右缘上下各留的边距:多条边在该范围内分配唯一出线点
 const EDGE_EXIT_MARGIN = 24;
 /** 任务列表挂载物的避障占位 id:只存在于障碍列表中,不是真实 agent。 */
 const TASK_LIST_NODE_ID = "tasklist";
 /** 折叠态的小图标尺寸(展开卡片走 cardW/taskCardH)。 */
 const TASK_STUB_SIZE = { width: 36, height: 36 };
-/** 折叠态小图标与主 Agent 的视觉间距(布局槽位仍是统一 gapX,渲染时向左拉近)。 */
+/** 折叠态小图标与主 Agent 的视觉间距(根目标左挂时贴靠;非根目标占同列槽位)。 */
 const TASK_STUB_GAP = 8;
 
 /** 压缩中清扫:提交后已离开 running 仍需等待的宽限(覆盖回合未启动就取消)。 */
@@ -333,23 +338,33 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
   const cardW = layout.compact
     ? Math.min(240, Math.max(CARD_W_COMPACT, (measuredWidth || 360) - 40))
     : CARD_W;
-  const gapX = layout.compact ? 18 : GAP_X;
-  const maxRowWidth = Math.max((measuredWidth || 1200) - 24, layout.compact ? cardW : cardW * 2 + gapX);
+  const gapCol = layout.compact ? 36 : GAP_COL;
+  const gapRow = layout.compact ? 18 : GAP_ROW;
   const taskCardH = layout.compact ? CARD_H_COMPACT : CARD_H;
   const taskCollapsed = taskList?.collapsed ?? false;
   // 挂载卡片与 Agent 卡片统一高度,不再随任务数变化:约容纳 3 条任务,其余在预览区内滚动
   const taskListCardH = taskCardH;
-  // 任务列表作为主 Agent 的"同排相邻兄弟槽位"进布局引擎:
-  // 布局保证槽位无重叠——其他卡片自动换行让位;折叠时同槽位换 36×36 小图标尺寸。
-  // 伪节点的父节点取主 Agent 的父节点(主 Agent 是根时伪节点同为根,相邻排布)
+  // 任务列表伪节点进布局引擎的两种形态:
+  // - 主 Agent 绑定目标是根:伪节点不进布局树——列布局下整树向右延伸,
+  //   挂载卡片锚定画布最左侧(根列左侧的预留带,见 taskLeftPad),不占布局槽位;
+  // - 目标非根:左侧被父列占据,伪节点作为兄弟槽位进布局树(同列,插在
+  //   目标之前 → 目标正上方),挂载卡片消费伪节点的布局位置。
+  // 折叠时挂载物换 36×36 小图标尺寸。
+  const taskTargetIsRoot = useMemo(() => {
+    if (!taskTargetAgentId) return false;
+    const targetParent = parentOf.get(taskTargetAgentId) ?? null;
+    return !targetParent || !displayAgents.some((agent) => agent.id === targetParent);
+  }, [taskTargetAgentId, parentOf, displayAgents]);
   const layoutIds = useMemo(() => {
     const ids = displayAgents.map((a) => a.id);
     if (!showTaskCard || !taskTargetAgentId) return ids;
+    const targetParent = parentOf.get(taskTargetAgentId) ?? null;
+    if (!targetParent || !ids.includes(targetParent)) return ids;
     const index = ids.indexOf(taskTargetAgentId);
     if (index < 0) return ids;
-    ids.splice(index + 1, 0, TASK_LIST_NODE_ID);
+    ids.splice(index, 0, TASK_LIST_NODE_ID);
     return ids;
-  }, [displayAgents, showTaskCard, taskTargetAgentId]);
+  }, [displayAgents, showTaskCard, taskTargetAgentId, parentOf]);
   const layoutParentOf = useMemo(() => {
     if (!showTaskCard || !taskTargetAgentId) return parentOf;
     const map = new Map(parentOf);
@@ -366,52 +381,60 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
     ]);
   }, [showTaskCard, taskCollapsed, cardW, taskListCardH]);
   const layoutResult: LayoutResult = useMemo(
-    () =>
-      computeLayout(
-        layoutIds,
-        layoutParentOf,
-        cardW,
-        taskCardH,
-        gapX,
-        GAP_Y,
-        maxRowWidth,
-        layoutSizes,
-      ),
-    [layoutIds, layoutParentOf, layoutSizes, cardW, taskCardH, gapX, maxRowWidth],
+    () => computeLayout(layoutIds, layoutParentOf, cardW, taskCardH, gapCol, gapRow, layoutSizes),
+    [layoutIds, layoutParentOf, layoutSizes, cardW, taskCardH, gapCol, gapRow],
   );
-  // 任务列表挂载槽位:固定锚定主 Agent 卡片右缘,不消费布局位置——
-  // 树布局按"子树盒右侧"推进伪节点,主 Agent 有宽子树时会被推离卡片
-  // (子行宽 > 卡片宽,距离 = (子树宽-卡片宽)/2 + gapX,且随子卡片数量漂移)。
-  // 这里无条件贴靠:展开间距 gapX(与卡片标准间距一致,连线长度正常),
-  // 折叠 8px(与主 Agent 视觉粘连),距离恒定不受其他卡片位置影响。
-  // 伪节点仍留在布局树占位(layoutIds/sizes 不变):它占的槽位宽度 ≥ 挂载物
-  // 实际宽度,后续卡片被推到伪节点布局位之后,拉回后不会与任何卡片重叠;
-  // 障碍/连线矩形与该视觉位置保持一致。null = 不显示
+  // 根目标挂载带:全部布局坐标右移 taskLeftPad,挂载物恰好从 x=0 开始、
+  // 右缘与主 Agent 左缘间距恒定(展开=列距,折叠=8px 视觉粘连)。
+  // 挂载带内不放任何其他卡片(第 1 列左侧永远为空),无需避障。
+  const taskLeftPad = useMemo(() => {
+    if (!showTaskCard || !taskTargetAgentId || !taskTargetIsRoot) return 0;
+    return taskCollapsed ? TASK_STUB_SIZE.width + TASK_STUB_GAP : cardW + gapCol;
+  }, [showTaskCard, taskTargetAgentId, taskTargetIsRoot, taskCollapsed, cardW, gapCol]);
+  const canvas: LayoutResult = useMemo(() => {
+    if (taskLeftPad === 0) return layoutResult;
+    const positions = new Map<string, LayoutPosition>();
+    for (const [id, p] of layoutResult.positions) positions.set(id, { x: p.x + taskLeftPad, y: p.y });
+    return { positions, width: layoutResult.width + taskLeftPad, height: layoutResult.height };
+  }, [layoutResult, taskLeftPad]);
+  // 任务列表挂载槽位:根目标锚定画布最左侧(预留带右缘与主 Agent 左缘间距
+  // 恒定:展开 gapCol、折叠 TASK_STUB_GAP,不随其他卡片位置漂移;整树坐标
+  // 已右移 taskLeftPad,挂载物 x 恒为 0);非根目标消费伪节点布局槽位
+  // (同列、目标正上方,布局保证无重叠)。null = 不显示
   const taskMountRect = useMemo(() => {
     if (!showTaskCard || !taskTargetAgentId) return null;
-    const plan = layoutResult.positions.get(taskTargetAgentId);
+    const plan = canvas.positions.get(taskTargetAgentId);
     if (!plan) return null;
-    if (taskCollapsed) {
-      // 折叠态:贴主 Agent 右缘 8px,垂直居中于主 Agent 卡片
-      return {
-        x: plan.x + cardW + TASK_STUB_GAP,
-        y: plan.y + (taskCardH - TASK_STUB_SIZE.height) / 2,
-        ...TASK_STUB_SIZE,
-      };
+    if (taskTargetIsRoot) {
+      if (taskCollapsed) {
+        // 折叠态:贴主 Agent 左缘 8px,垂直居中于主 Agent 卡片
+        return {
+          x: plan.x - TASK_STUB_GAP - TASK_STUB_SIZE.width,
+          y: plan.y + (taskCardH - TASK_STUB_SIZE.height) / 2,
+          ...TASK_STUB_SIZE,
+        };
+      }
+      return { x: plan.x - gapCol - cardW, y: plan.y, width: cardW, height: taskListCardH };
     }
-    return { x: plan.x + cardW + gapX, y: plan.y, width: cardW, height: taskListCardH };
-  }, [showTaskCard, taskTargetAgentId, layoutResult, taskCollapsed, cardW, taskListCardH, gapX, taskCardH]);
+    const slot = canvas.positions.get(TASK_LIST_NODE_ID);
+    if (!slot) return null;
+    return {
+      x: slot.x,
+      y: slot.y,
+      width: taskCollapsed ? TASK_STUB_SIZE.width : cardW,
+      height: taskCollapsed ? TASK_STUB_SIZE.height : taskListCardH,
+    };
+  }, [showTaskCard, taskTargetAgentId, taskTargetIsRoot, canvas, taskCollapsed, cardW, taskListCardH, gapCol, taskCardH]);
 
-  // 同父多条边:子卡片按 x(再按 id)稳定排序,在父卡片底部宽度内留边距
-  // 分配唯一出线点(单 child 居中),各边从底部不同位置独立发出不重叠
-  // 同父多条边:子卡片按 x(再按 id)稳定排序,在父卡片底部宽度内留边距
-  // 分配唯一出线点(单 child 居中),各边从底部不同位置独立发出不重叠。
+  // 同父多条边:子卡片按 y(再按 id)稳定排序,在父卡片右缘高度内留边距
+  // 分配唯一出线点(单 child 居中),各边从右缘不同高度独立发出不重叠;
+  // 竖直段在列间通道内按边分配车道(laneXs),同父的扇形边不共线。
   // 每条边做避障规划(障碍=除两端卡片外的全部卡片),直连碰撞时绕行。
   const edges = useMemo(() => {
     const cardH = layout.compact ? CARD_H_COMPACT : CARD_H;
     const rects: ObstacleRect[] = [];
     for (const agent of displayAgents) {
-      const position = layoutResult.positions.get(agent.id);
+      const position = canvas.positions.get(agent.id);
       if (position) rects.push({ id: agent.id, x: position.x, y: position.y, width: cardW, height: cardH });
     }
     if (taskMountRect) {
@@ -424,32 +447,36 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
         height: taskMountRect.height,
       });
     }
-    const byParent = new Map<string, { id: string; x: number }[]>();
+    const byParent = new Map<string, { id: string; y: number }[]>();
     for (const agent of displayAgents) {
       const parent = metas.get(agent.id)?.parentId;
       if (!parent) continue;
-      const parentPos = layoutResult.positions.get(parent);
-      const childPos = layoutResult.positions.get(agent.id);
+      const parentPos = canvas.positions.get(parent);
+      const childPos = canvas.positions.get(agent.id);
       if (!parentPos || !childPos) continue;
       const list = byParent.get(parent);
-      if (list) list.push({ id: agent.id, x: childPos.x });
-      else byParent.set(parent, [{ id: agent.id, x: childPos.x }]);
+      if (list) list.push({ id: agent.id, y: childPos.y });
+      else byParent.set(parent, [{ id: agent.id, y: childPos.y }]);
     }
     const list: { fromId: string; toId: string; sampled: SampledPath; direct: boolean; degraded: boolean }[] = [];
     for (const [parentId, children] of byParent) {
-      const parentPos = layoutResult.positions.get(parentId);
+      const parentPos = canvas.positions.get(parentId);
       if (!parentPos) continue;
-      children.sort((a, b) => a.x - b.x || a.id.localeCompare(b.id));
-      const offsets = assignExitOffsets(cardW, children.length, EDGE_EXIT_MARGIN);
-      const parentBottom = parentPos.y + cardH;
+      children.sort((a, b) => a.y - b.y || a.id.localeCompare(b.id));
+      const exitOffsets = assignExitOffsets(cardH, children.length, EDGE_EXIT_MARGIN);
+      // 车道分配:列间通道宽度内均匀分布(左右各收 4px),单 child 居中
+      const laneUsable = Math.max(gapCol - 8, 8);
+      const laneOffsets = assignExitOffsets(laneUsable, children.length, 4);
+      const parentRight = parentPos.x + cardW;
       children.forEach((child, index) => {
-        const childPos = layoutResult.positions.get(child.id);
+        const childPos = canvas.positions.get(child.id);
         if (!childPos) return;
-        const from = { x: parentPos.x + (offsets[index] ?? cardW / 2), y: parentBottom };
-        const to = { x: childPos.x + cardW / 2, y: childPos.y };
+        const from = { x: parentRight, y: parentPos.y + (exitOffsets[index] ?? cardH / 2) };
+        const to = { x: childPos.x, y: childPos.y + cardH / 2 };
+        const laneX = parentRight + 4 + (laneOffsets[index] ?? laneUsable / 2);
         // 两端卡片必须排除:端点位于卡片边界上,膨胀后必相交
         const obstacles = rects.filter((rect) => rect.id !== parentId && rect.id !== child.id);
-        const planned = planEdgePath(from, to, obstacles);
+        const planned = planEdgePath(from, to, obstacles, { laneXs: [laneX] });
         list.push({
           fromId: parentId,
           toId: child.id,
@@ -460,36 +487,41 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       });
     }
     return list;
-  }, [displayAgents, metas, layoutResult, cardW, layout.compact, taskMountRect]);
+  }, [displayAgents, metas, canvas, cardW, layout.compact, taskMountRect, gapCol]);
 
   // 主 Agent → 任务列表:灰色虚线;无流光,走 planEdgePath 避障绕行但
-  // 不计入 degraded 统计(挂载线允许 degraded 直连兜底)。折叠成图标后不画线
+  // 不计入 degraded 统计(挂载线允许 degraded 直连兜底)。折叠成图标后不画线。
+  // 根目标:挂载卡片在左,虚线水平进入目标左缘(预留带内无卡片,恒为直连);
+  // 非根目标:挂载卡片在目标正上方,虚线从挂载卡片底缘中点进入目标顶缘
   const taskEdge = useMemo(() => {
     if (!showTaskCard || taskCollapsed || !taskTargetAgentId) return null;
     if (!taskMountRect) return null;
-    const parentPos = layoutResult.positions.get(taskTargetAgentId);
-    if (!parentPos) return null;
-    const cardOnRight = taskMountRect.x > parentPos.x;
-    const from: Point = {
-      x: cardOnRight ? parentPos.x + cardW : parentPos.x,
-      y: parentPos.y + taskCardH / 2,
-    };
-    const to: Point = {
-      x: cardOnRight ? taskMountRect.x : taskMountRect.x + taskMountRect.width,
-      y: taskMountRect.y + taskMountRect.height / 2,
-    };
+    const targetPos = canvas.positions.get(taskTargetAgentId);
+    if (!targetPos) return null;
+    const from: Point = taskTargetIsRoot
+      ? {
+          x: taskMountRect.x + taskMountRect.width,
+          y: taskMountRect.y + taskMountRect.height / 2,
+        }
+      : {
+          x: taskMountRect.x + taskMountRect.width / 2,
+          y: taskMountRect.y + taskMountRect.height,
+        };
+    const to: Point = taskTargetIsRoot
+      ? { x: targetPos.x, y: targetPos.y + taskCardH / 2 }
+      : { x: targetPos.x + cardW / 2, y: targetPos.y };
     // 障碍 = 除 target 外全部显示卡片;两端卡片天然不在列表
     const obstacles: ObstacleRect[] = [];
     for (const agent of displayAgents) {
-      const position = layoutResult.positions.get(agent.id);
+      const position = canvas.positions.get(agent.id);
       if (!position || agent.id === taskTargetAgentId) continue;
       obstacles.push({ id: agent.id, x: position.x, y: position.y, width: cardW, height: taskCardH });
     }
     return { sampled: planEdgePath(from, to, obstacles).sampled };
-  }, [showTaskCard, taskCollapsed, taskTargetAgentId, taskMountRect, layoutResult, cardW, taskCardH, displayAgents]);
+  }, [showTaskCard, taskCollapsed, taskTargetAgentId, taskTargetIsRoot, taskMountRect, canvas, cardW, taskCardH, displayAgents]);
 
   // 绕行路径可能越出布局包围盒:画布随之扩展,避免被 ScrollView 裁掉
-  // (任务列表槽位在布局引擎内,画布范围已含它)
+  // (根目标挂载带已计入 canvas.width)
   const routeExtent = useMemo(
     () =>
       routeBounds([
@@ -498,8 +530,16 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       ]),
     [edges, taskEdge],
   );
-  const canvasWidth = Math.max(layoutResult.width, routeExtent.maxX + 4);
-  const canvasHeight = Math.max(layoutResult.height, routeExtent.maxY + 4);
+  const canvasWidth = Math.max(canvas.width, routeExtent.maxX + 4);
+  const canvasHeight = Math.max(canvas.height, routeExtent.maxY + 4);
+  // 窄屏缩放(借鉴 pase-omo):内容宽超出可视宽度时整体等比缩小到恰好放下
+  // (下限 MIN_CANVAS_SCALE),仍放不下再横向滚动。上下树改左右列后横向变长,
+  // 缩放让浅层树在窄面板上仍一屏可见
+  const canvasScale = useMemo(() => {
+    const available = Math.max(measuredWidth - 24, 120);
+    if (canvasWidth <= 0 || canvasWidth <= available) return 1;
+    return Math.max(MIN_CANVAS_SCALE, available / canvasWidth);
+  }, [canvasWidth, measuredWidth]);
 
   // 统计跟随显示范围:工作区视图下显示当前工作区的计数
   const stats = useMemo(() => {
@@ -887,7 +927,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       panelWidth: measuredWidth,
       panelWidthReported: panelWidth,
       windowWidth: windowDims.width,
-      rowWidth: maxRowWidth,
+      rowWidth: canvas.width,
       ready,
       error,
       projectId,
@@ -896,22 +936,22 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
       agents: agents.length,
       visible: visible.length,
       metas: metas.size,
-      canvasW: layoutResult.width,
-      canvasH: layoutResult.height,
-      positions: layoutResult.positions.size,
+      canvasW: canvas.width,
+      canvasH: canvas.height,
+      positions: canvas.positions.size,
       edges: edges.length,
       edgesRouted: edges.filter((edge) => !edge.direct).length,
       // 非零即异常:该边穿卡,必须排查(所有绕行策略失败的兜底直连)
       edgesDegraded: edges.filter((edge) => edge.degraded).length,
       parents: Object.fromEntries(visible.map((agent) => [agent.title ?? agent.id.slice(0, 8), parentOf.get(agent.id) ?? null])),
       coords: Object.fromEntries(visible.map((agent) => {
-        const p = layoutResult.positions.get(agent.id);
+        const p = canvas.positions.get(agent.id);
         return [agent.title ?? agent.id.slice(0, 8), p ? `${Math.round(p.x)},${Math.round(p.y)}` : "none"];
       })),
     });
     const timer = setTimeout(() => void reportRef.current({ payload }), 1500);
     return () => clearTimeout(timer);
-  }, [workspaceId, layout.platform, layout.compact, measuredWidth, panelWidth, windowDims.width, maxRowWidth, ready, error, projectId, projectName, workspaces.length, agents.length, visible.length, metas, layoutResult, edges.length]);
+  }, [workspaceId, layout.platform, layout.compact, measuredWidth, panelWidth, windowDims.width, ready, error, projectId, projectName, workspaces.length, agents.length, visible.length, metas, canvas, edges.length]);
 
   const openAgent = useCallback(
     (agentId: string) => {
@@ -1410,10 +1450,28 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
             contentContainerStyle={{ flexGrow: 1, minHeight: "100%" }}
           >
             <View
+              style={{
+                // 缩放容器:外壳按缩放后尺寸占位(ScrollView 按它滚动/居中),
+                // 内层画布保持原始尺寸,transform 缩放围绕中心进行后用平移
+                // 补偿回左上角(p' = s·p,平移量 = -中心 × (1-s))
+                width: Math.max(canvasWidth * canvasScale, 1),
+                height: Math.max(canvasHeight * canvasScale, 1),
+                marginHorizontal: "auto",
+                marginVertical: "auto",
+              }}
+            >
+            <View
               style={[
                 styles.canvasInner,
-                { marginHorizontal: "auto", marginVertical: "auto" },
-                { width: Math.max(canvasWidth, 1), height: Math.max(canvasHeight, 1) },
+                {
+                  width: Math.max(canvasWidth, 1),
+                  height: Math.max(canvasHeight, 1),
+                  transform: [
+                    { translateX: (-canvasWidth * (1 - canvasScale)) / 2 },
+                    { translateY: (-canvasHeight * (1 - canvasScale)) / 2 },
+                    { scale: canvasScale },
+                  ],
+                },
               ]}
             >
               {/* 画布空白层:点击清空选中;光标显式 auto(默认箭头,RN CursorValue 无
@@ -1437,14 +1495,25 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                   const fromAgent = agentById.get(edge.fromId);
                   const toAgent = agentById.get(edge.toId);
                   if (!fromAgent || !toAgent) return null;
-                  const active =
-                    statusOf(fromAgent) === "running" && statusOf(toAgent) === "running";
+                  // 边色跟随子 Agent 状态(依赖由源完成而满足,语义与 pase-omo 一致):
+                  // 子运行中 → 运行色;子出错 → 错误色;子已跑过且空闲 → 完成色;
+                  // 其余(未开工/初始化)→ 主题边框色
+                  const toStatus = statusOf(toAgent);
+                  const hasRun = metas.get(edge.toId)?.lastActivityAt != null;
+                  const color =
+                    toStatus === "running"
+                      ? statusColors.running
+                      : toStatus === "error"
+                        ? statusColors.failed
+                        : toStatus === "idle" && hasRun
+                          ? statusColors.done
+                          : theme.colors.border;
                   const dim = fromAgent.archived || toAgent.archived;
                   return (
                     <GraphEdgeLine
                       key={`line:${edge.fromId}->${edge.toId}`}
                       sampled={edge.sampled}
-                      color={active ? statusColors.running : theme.colors.border}
+                      color={color}
                       dim={dim}
                     />
                   );
@@ -1454,7 +1523,8 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                   const fromAgent = agentById.get(edge.fromId);
                   const toAgent = agentById.get(edge.toId);
                   if (!fromAgent || !toAgent) return null;
-                  if (statusOf(fromAgent) !== "running" || statusOf(toAgent) !== "running") {
+                  // 子 Agent 运行中即挂流点(父派发后自身先结束回合,工作仍在向右流动)
+                  if (statusOf(toAgent) !== "running") {
                     return null;
                   }
                   // 压缩中的连线不挂流点:压缩是上下文维护,不是流向子 Agent 的新工作
@@ -1472,7 +1542,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
               </View>
             <View style={styles.cardLayer} pointerEvents="box-none">
               {displayAgents.map((agent) => {
-                const position = layoutResult.positions.get(agent.id);
+                const position = canvas.positions.get(agent.id);
                 if (!position) return null;
                 return (
                   <View
@@ -1563,6 +1633,7 @@ export function GraphPanel({ theme, layout, workspaceId, navigation, host }: Plu
                   )}
                 </View>
               ) : null}
+            </View>
             </View>
             </View>
           </ScrollView>

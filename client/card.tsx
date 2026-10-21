@@ -10,6 +10,7 @@ import { archivePolicy } from "../shared/archive-policy";
 import type { StatusColors } from "../shared/settings";
 import { DEFAULT_RUNNING_COLOR } from "../shared/settings";
 import type { AgentNodeMetadata } from "../shared/agent-metadata";
+import { useRunActivity } from "./run-activity";
 import { ContextMeter } from "./context-meter";
 import { FeedbackPressable } from "./feedback-pressable";
 
@@ -346,6 +347,8 @@ export const AgentCard = memo(function AgentCard({
         },
         contextText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13, flexShrink: 1 },
         compactText: { color: theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
+        // 运行活动行(耗时 · tok/s · progress):仅运行中渲染,不占固定行高
+        activityText: { color: theme.colors.accent ?? theme.colors.foregroundMuted, fontSize: 10, lineHeight: 13 },
         // 压缩按钮悬停/按下反馈
         compactButton: { minHeight: compact ? 28 : undefined, justifyContent: "center", paddingHorizontal: compact ? 6 : 0 },
         compactDisabled: { opacity: 0.5 },
@@ -358,6 +361,9 @@ export const AgentCard = memo(function AgentCard({
         },
         actions: {
           flexDirection: "row",
+          // 钉在卡片底部:空闲卡片不渲染活动行时,高度预留的余量落在
+          // 上下文行与分割线之间,而不是操作区下方留白
+          marginTop: "auto",
           // 分割线整体内缩 3px(呼吸环线宽):横线两端、竖线下端与环相接但不再叠压,
           // 底部同时让出环的走线位置,避免操作区分割线盖住呼吸框
           marginHorizontal: 3,
@@ -421,6 +427,10 @@ export const AgentCard = memo(function AgentCard({
   const idleOpacity =
     fadeEligible && idleTier ? Math.min(1, Math.max(0, idleTier.opacity)) : 1;
   const opacity = archived ? 0.4 : hovered || selected ? 1 : idleOpacity;
+  // 运行活动行(借鉴 pase-omo 画板):运行中才轮询 timeline tail 并显示
+  // "耗时 · tok/s · progress";其余状态不占行,卡片高度不变
+  const running = status === "running" && !archived;
+  const activity = useRunActivity(agentId, running);
   const statusLabel = archived
     ? "已归档"
     : compacting
@@ -518,6 +528,11 @@ export const AgentCard = memo(function AgentCard({
             </FeedbackPressable>
           ) : null}
         </View>
+        {running && activity.line ? (
+          <Text style={styles.activityText} numberOfLines={1} ellipsizeMode="tail">
+            {activity.line}
+          </Text>
+        ) : null}
       </View>
       <View style={styles.actions}>
         {!archived ? (

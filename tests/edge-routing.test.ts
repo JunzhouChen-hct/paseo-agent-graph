@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { computeLayout, type LayoutResult } from "../client/layout.ts";
 import {
-  freeXBands,
+  freeYBands,
   planEdgePath,
   polylineHitsRects,
   ROUTE_MARGIN,
@@ -26,42 +26,52 @@ interface GraphPlan {
   edges: PlannedEdge[];
 }
 
-/** 面板同款规划:exit 分配 → 逐边 planEdgePath(障碍排除两端卡片) */
+/** 面板同款规划(横向语义):右缘出线分配 → 车道分配 → 逐边 planEdgePath */
 function planGraph(
   ids: string[],
   parentOf: ReadonlyMap<string, string | null>,
   cardW: number,
   cardH: number,
-  gapX: number,
-  gapY: number,
-  maxRowWidth: number,
+  gapCol: number,
+  gapRow: number,
+  withLanes = true,
 ): GraphPlan {
-  const layout = computeLayout(ids, parentOf, cardW, cardH, gapX, gapY, maxRowWidth);
+  const layout = computeLayout(ids, parentOf, cardW, cardH, gapCol, gapRow);
   const rects: ObstacleRect[] = [];
   for (const id of ids) {
     const position = layout.positions.get(id)!;
     rects.push({ id, x: position.x, y: position.y, width: cardW, height: cardH });
   }
-  const byParent = new Map<string, { id: string; x: number }[]>();
+  const byParent = new Map<string, { id: string; y: number }[]>();
   for (const id of ids) {
     const parent = parentOf.get(id) ?? null;
     if (!parent) continue;
     const childPos = layout.positions.get(id)!;
     const list = byParent.get(parent);
-    if (list) list.push({ id, x: childPos.x });
-    else byParent.set(parent, [{ id, x: childPos.x }]);
+    if (list) list.push({ id, y: childPos.y });
+    else byParent.set(parent, [{ id, y: childPos.y }]);
   }
   const edges: PlannedEdge[] = [];
   for (const [parentId, children] of byParent) {
     const parentPos = layout.positions.get(parentId)!;
-    children.sort((a, b) => a.x - b.x || a.id.localeCompare(b.id));
-    const offsets = assignExitOffsets(cardW, children.length, 24);
+    children.sort((a, b) => a.y - b.y || a.id.localeCompare(b.id));
+    const exitOffsets = assignExitOffsets(cardH, children.length, 24);
+    const laneUsable = Math.max(gapCol - 8, 8);
+    const laneOffsets = assignExitOffsets(laneUsable, children.length, 4);
+    const parentRight = parentPos.x + cardW;
     children.forEach((child, index) => {
       const childPos = layout.positions.get(child.id)!;
-      const from = { x: parentPos.x + (offsets[index] ?? cardW / 2), y: parentPos.y + cardH };
-      const to = { x: childPos.x + cardW / 2, y: childPos.y };
+      const from = { x: parentRight, y: parentPos.y + (exitOffsets[index] ?? cardH / 2) };
+      const to = { x: childPos.x, y: childPos.y + cardH / 2 };
+      const laneX = withLanes ? parentRight + 4 + (laneOffsets[index] ?? laneUsable / 2) : undefined;
       const obstacles = rects.filter((rect) => rect.id !== parentId && rect.id !== child.id);
-      edges.push({ fromId: parentId, toId: child.id, from, to, ...planEdgePath(from, to, obstacles) });
+      edges.push({
+        fromId: parentId,
+        toId: child.id,
+        from,
+        to,
+        ...planEdgePath(from, to, obstacles, laneX === undefined ? undefined : { laneXs: [laneX] }),
+      });
     });
   }
   return { layout, rects, edges };
@@ -87,111 +97,131 @@ function assertClear(edge: PlannedEdge, plan: GraphPlan, margin: number): void {
   assert.equal(hit, null, `margin ${margin} 下边被障碍 ${hit} 阻挡`);
 }
 
-/** 竖直走廊 x 是否落在横跨行的卡片簇内部(而非簇外大绕) */
-function corridorInsideCluster(edge: PlannedEdge, rects: ObstacleRect[]): boolean {
-  const corridorX = edge.waypoints[2]?.x;
-  if (corridorX === undefined) return true;
-  const yLo = Math.min(edge.waypoints[1]!.y, edge.waypoints[3]!.y);
-  const yHi = Math.max(edge.waypoints[1]!.y, edge.waypoints[3]!.y);
-  const crossing = rects.filter(
-    (rect) => rect.id !== edge.fromId && rect.id !== edge.toId && rect.y + rect.height > yLo && rect.y < yHi,
-  );
-  if (crossing.length === 0) return true;
-  const left = Math.min(...crossing.map((rect) => rect.x));
-  const right = Math.max(...crossing.map((rect) => rect.x + rect.width));
-  return corridorX >= left && corridorX <= right;
-}
-
-test("冒烟:窄面板(compact,gapX=18)root+12 子 2/列换行——零碰撞零退化,跨行走中间空隙", () => {
+test("冒烟:compact(gapCol=36) root+12 子单列——零碰撞零退化,同父车道互不重合", () => {
   const ids = ["root", ...Array.from({ length: 12 }, (_, i) => `c${i}`)];
   const parentOf = new Map<string, string | null>(ids.map((id) => [id, id === "root" ? null : "root"]));
-  const plan = planGraph(ids, parentOf, 164, 148, 18, 58, 346);
+  const plan = planGraph(ids, parentOf, 164, 148, 36, 18);
   assert.equal(plan.edges.length, 12);
-  let direct = 0;
-  let routed = 0;
+  const laneXs = new Set<number>();
   for (const edge of plan.edges) {
-    assert.equal(edge.degraded, false, "窄面板不允许退化穿卡");
+    assert.equal(edge.degraded, false, "列布局下不允许退化穿卡");
+    assert.equal(edge.direct, true, "列间通道内无卡片,全部应为列间台阶直连");
     assertOrthogonal(edge);
     assertClear(edge, plan, ROUTE_MARGIN);
     assertClear(edge, plan, 0);
-    if (edge.direct) direct++;
-    else {
-      routed++;
-      assert.ok(corridorInsideCluster(edge, plan.rects), "跨行边走廊必须在卡片簇内部,不允许外侧大绕");
-      // 走廊零膨胀下不得落在任何横跨行卡片内部
-      const corridorX = edge.waypoints[2]!.x;
-      const yLo = Math.min(edge.waypoints[1]!.y, edge.waypoints[3]!.y);
-      const yHi = Math.max(edge.waypoints[1]!.y, edge.waypoints[3]!.y);
-      for (const rect of plan.rects) {
-        if (rect.id === edge.fromId || rect.id === edge.toId) continue;
-        const crosses = rect.y + rect.height > yLo && rect.y < yHi;
-        if (!crosses) continue;
-        assert.ok(
-          corridorX < rect.x || corridorX > rect.x + rect.width,
-          `走廊 x=${corridorX} 穿过卡片 ${rect.id}`,
-        );
-      }
-    }
+    // 竖直段车道必须落在列间通道内
+    const laneX = edge.waypoints[1]!.x;
+    const parentRight = edge.from.x;
+    assert.ok(
+      laneX > parentRight && laneX < parentRight + 36,
+      `车道 x=${laneX} 必须在列间通道 (${parentRight},${parentRight + 36}) 内`,
+    );
+    laneXs.add(laneX);
   }
-  assert.ok(direct > 0, "第一行子节点应能带内台阶直连");
-  assert.ok(routed > 0, "12 子 2/列必有跨行边");
+  assert.equal(laneXs.size, 12, "同父 12 条边的车道 x 必须两两不同");
 });
 
-test("冒烟:宽面板(desktop,gapX=26)单行 3 子——全部带内台阶直连", () => {
-  const ids = ["root", "c0", "c1", "c2"];
-  const parentOf = new Map<string, string | null>(ids.map((id) => [id, id === "root" ? null : "root"]));
-  const plan = planGraph(ids, parentOf, 196, 148, 26, 58, 1200);
-  assert.equal(plan.edges.length, 3);
+test("冒烟:三代树(根→3子→各2孙)——全部相邻列台阶直连,列 x 逐列右移", () => {
+  const ids = ["root", "c0", "c1", "c2", "g0a", "g0b", "g1a", "g1b", "g2a", "g2b"];
+  const parentOf = new Map<string, string | null>([
+    ["root", null], ["c0", "root"], ["c1", "root"], ["c2", "root"],
+    ["g0a", "c0"], ["g0b", "c0"], ["g1a", "c1"], ["g1b", "c1"], ["g2a", "c2"], ["g2b", "c2"],
+  ]);
+  const plan = planGraph(ids, parentOf, 196, 148, 52, 26);
+  assert.equal(plan.edges.length, 9);
   for (const edge of plan.edges) {
     assert.equal(edge.degraded, false);
-    assert.equal(edge.direct, true, "单行相邻边应直连");
-    const aligned = Math.abs(edge.from.x - edge.to.x) < 0.5;
-    assert.equal(edge.waypoints.length, aligned ? 2 : 4);
-    if (!aligned) {
-      const midY = (edge.from.y + edge.to.y) / 2;
-      assert.equal(edge.waypoints[1]!.y, midY);
-      assert.equal(edge.waypoints[2]!.y, midY);
+    assertOrthogonal(edge);
+    assertClear(edge, plan, ROUTE_MARGIN);
+  }
+  const root = plan.layout.positions.get("root")!;
+  const c0 = plan.layout.positions.get("c0")!;
+  const g0a = plan.layout.positions.get("g0a")!;
+  assert.equal(c0.x, root.x + 196 + 52, "子列 x = 根列 x + 卡宽 + 列距");
+  assert.equal(g0a.x, c0.x + 196 + 52, "孙列紧随子列");
+  // 子块向父收拢:c0/c1/c2 的块中心对齐 root 中心(block 高 3*148+2*26=496,
+  // 期望中心 74 → 期望 y = 74-248 < 0,夹到 0,即保持顶部装箱)
+  assert.equal(c0.y, 0);
+  // g0a/g0b 向 c0 收拢:块高 2*148+26=322,c0 中心 74 → 期望 y=74-161<0 → 夹 0
+  assert.equal(g0a.y, c0.y);
+  assert.equal(plan.layout.positions.get("g0b")!.y, c0.y + 148 + 26);
+});
+
+test("冒烟:向父收拢被上方卡片约束时,不下移越界、保持零重叠", () => {
+  // 列0: r1, r2;列1: c_a(r1 子)、k1、k2(r2 子)。c_a 收拢到 r1 中心;
+  // k1/k2 块想收拢到 r2 中心,但 c_a 占据上方空间 → 只能停在可用区间内
+  const H = 148;
+  const gapRow = 26;
+  const ids = ["r1", "r2", "c_a", "k1", "k2"];
+  const parentOf = new Map<string, string | null>([
+    ["r1", null], ["r2", null], ["c_a", "r1"], ["k1", "r2"], ["k2", "r2"],
+  ]);
+  const plan = planGraph(ids, parentOf, 196, H, 52, gapRow);
+  const r1 = plan.layout.positions.get("r1")!;
+  const r2 = plan.layout.positions.get("r2")!;
+  const cA = plan.layout.positions.get("c_a")!;
+  const k1 = plan.layout.positions.get("k1")!;
+  const k2 = plan.layout.positions.get("k2")!;
+  // c_a 向 r1 收拢:单块,中心对齐 → y 与 r1 一致
+  assert.equal(cA.y, r1.y);
+  // r2 在第 1 列的 y = H + gapRow(根列装箱);k1/k2 块高 2H+gapRow,
+  // 期望中心 = r2 中心 → 期望起点 = r2.y;上方受 c_a(底 = r1.y+H+gapRow)约束
+  const minAllowed = r1.y + H + gapRow;
+  const expected = Math.max(r2.y, minAllowed);
+  assert.equal(k1.y, expected);
+  assert.equal(k2.y, expected + H + gapRow);
+  // 无论收拢结果如何,列 1 内部零重叠
+  const rects = [
+    { id: "c_a", ...cA }, { id: "k1", ...k1 }, { id: "k2", ...k2 },
+  ].map((r) => ({ x: r.x, y: r.y, width: 196, height: H }));
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      const a = rects[i]!;
+      const b = rects[j]!;
+      assert.ok(
+        a.y + H + gapRow <= b.y || b.y + H + gapRow <= a.y,
+        "同列卡片必须保持行距不重叠",
+      );
     }
-    assertOrthogonal(edge);
-    assertClear(edge, plan, ROUTE_MARGIN);
   }
 });
 
-test("冒烟:多行(2/列)跨行边优先两卡之间的中间空隙,不走外侧", () => {
-  const ids = ["root", "c0", "c1", "c2", "c3"];
-  const parentOf = new Map<string, string | null>(ids.map((id) => [id, id === "root" ? null : "root"]));
-  // 196*2+26 = 418 → 每行 2 张,共 2 行子节点
-  const plan = planGraph(ids, parentOf, 196, 148, 26, 58, 418);
-  const row2 = plan.edges.filter((edge) => !edge.direct);
-  assert.equal(row2.length, 2, "第二行的 2 个子节点需要跨行绕行");
-  const c0Y = plan.layout.positions.get("c0")!.y;
-  const row1 = plan.rects.filter((rect) => rect.id !== "root" && rect.y === c0Y).sort((a, b) => a.x - b.x);
-  assert.equal(row1.length, 2);
-  const gapLo = row1[0]!.x + row1[0]!.width;
-  const gapHi = row1[1]!.x;
-  assert.ok(gapHi > gapLo, "第一行两卡之间应存在空隙");
-  for (const edge of row2) {
-    assert.equal(edge.degraded, false);
-    const corridorX = edge.waypoints[2]!.x;
-    assert.ok(
-      corridorX > gapLo && corridorX < gapHi,
-      `走廊 x=${corridorX} 必须在第一行两卡之间 (${gapLo},${gapHi})`,
-    );
-    assertOrthogonal(edge);
-    assertClear(edge, plan, ROUTE_MARGIN);
-  }
+test("单子节点 y 对齐时同行直连:两点路径", () => {
+  const ids = ["root", "c0"];
+  const parentOf = new Map<string, string | null>([["root", null], ["c0", "root"]]);
+  const plan = planGraph(ids, parentOf, 196, 148, 52, 26);
+  const edge = plan.edges[0]!;
+  // 单子被收拢到与父垂直居中对齐 → 同行直连
+  assert.equal(edge.degraded, false);
+  assert.equal(edge.waypoints.length, 2);
+  assert.equal(edge.waypoints[0]!.y, edge.waypoints[1]!.y);
+  assertOrthogonal(edge);
+  assertClear(edge, plan, ROUTE_MARGIN);
 });
 
-test("freeXBands:返回障碍之间的自由 x 带,竖直跨度外不遮挡", () => {
+test("无车道候选时退回中点车道,仍直连不退化", () => {
+  const plan = planEdgePath(
+    { x: 100, y: 0 },
+    { x: 152, y: 80 },
+    [],
+  );
+  assert.equal(plan.degraded, false);
+  assert.equal(plan.direct, true);
+  const midX = (100 + 152) / 2;
+  assert.equal(plan.waypoints[1]!.x, midX);
+  assert.equal(plan.waypoints[2]!.x, midX);
+});
+
+test("freeYBands:返回障碍之间的自由 y 带,水平跨度外不遮挡", () => {
   const rects: ObstacleRect[] = [
     { id: "a", x: 0, y: 0, width: 100, height: 100 },
-    { id: "b", x: 120, y: 0, width: 100, height: 100 },
+    { id: "b", x: 0, y: 120, width: 100, height: 100 },
   ];
-  const bands = freeXBands(0, 220, -50, 150, rects, 6);
+  const bands = freeYBands(0, 220, -50, 150, rects, 6);
   assert.equal(bands.length, 1);
   assert.equal(bands[0]![0], 106);
   assert.equal(bands[0]![1], 114);
-  const clear = freeXBands(0, 220, 200, 300, rects, 6);
+  const clear = freeYBands(0, 220, 200, 300, rects, 6);
   assert.equal(clear.length, 1);
   assert.equal(clear[0]![0], 0);
   assert.equal(clear[0]![1], 220);
